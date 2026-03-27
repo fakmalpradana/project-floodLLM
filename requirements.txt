@@ -16,7 +16,7 @@ folium==0.18.0
 mapclassify==2.8.1
 
 # Satellite data
-sentinelsat==1.4.1
+sentinelsat==1.2.1
 earthengine-api==1.4.0
 
 # Data processing
