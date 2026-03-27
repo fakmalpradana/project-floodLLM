@@ -1,0 +1,12 @@
+name: flood-llm
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - gdal
+  - proj
+  - geos
+  - pip:
+    - -r requirements.txt

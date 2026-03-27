@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.conda/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Data
+data/*.tiff
+data/*.nc
+data/*.h5
+output/*.tiff
+output/*.png
+
+# Reports (keep templates)
+output/reports/*.pdf
+output/reports/*.html
+
+# Maps
+output/maps/*.html
+
+# Environment
+.env
+*.env.local
+
+# Jupyter
+.ipynb_checkpoints
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
