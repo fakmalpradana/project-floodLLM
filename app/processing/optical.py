@@ -12,6 +12,42 @@ except ImportError:
 from ..utils.config import settings
 
 
+def calculate_ndwi_and_mask(input_path: str, green_band_idx: int = 1, nir_band_idx: int = 2,
+                            threshold: float = 0.0, output_path: str = None) -> tuple:
+    """Calculates NDWI from optical imagery and returns a binary water mask."""
+    import rasterio as _rasterio
+
+    with _rasterio.open(input_path) as src:
+        green = src.read(green_band_idx).astype(np.float32)
+        nir = src.read(nir_band_idx).astype(np.float32)
+        profile = src.profile
+        nodata = src.nodata
+
+    valid_mask = np.ones_like(green, dtype=bool)
+    if nodata is not None:
+        valid_mask = (green != nodata) & (nir != nodata)
+
+    denominator = green + nir
+    denominator_safe = np.where(denominator == 0, 1e-10, denominator)
+
+    ndwi = np.zeros_like(green, dtype=np.float32)
+    ndwi[valid_mask] = (green[valid_mask] - nir[valid_mask]) / denominator_safe[valid_mask]
+
+    water_mask = np.zeros_like(ndwi, dtype=np.uint8)
+    water_mask[valid_mask & (ndwi > threshold)] = 1
+
+    if nodata is not None:
+        water_mask[~valid_mask] = 255
+
+    profile.update({'dtype': 'uint8', 'count': 1, 'nodata': 255})
+
+    if output_path:
+        with _rasterio.open(output_path, 'w', **profile) as dst:
+            dst.write(water_mask, 1)
+
+    return water_mask, profile
+
+
 class OpticalProcessor:
     """Process Sentinel-2 optical data for flood validation."""
 

@@ -1,7 +1,53 @@
 """PDF report generation."""
+import os
+import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
+
+
+def calculate_area(water_mask: np.ndarray, transform) -> float:
+    """Calculates total flooded area in hectares based on pixel dimensions."""
+    water_pixels = np.sum(water_mask == 1)
+    pixel_width = abs(transform[0])
+    pixel_height = abs(transform[4])
+    area_per_pixel_sqm = pixel_width * pixel_height
+    return (water_pixels * area_per_pixel_sqm) / 10000.0
+
+
+def generate_flood_report(location: str, start_date: str, end_date: str,
+                          flood_area_ha: float, output_html_path: str):
+    """Generates a lightweight HTML summary report."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>FloodLLM Analysis Report - {location}</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, sans-serif; margin: 40px; color: #333; }}
+            h1 {{ color: #0056b3; border-bottom: 2px solid #0056b3; padding-bottom: 10px; }}
+            .summary-card {{ background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; margin-top: 20px; }}
+            .metric {{ font-size: 1.2em; margin: 10px 0; }}
+            .highlight {{ font-weight: bold; color: #d9534f; font-size: 1.5em; }}
+        </style>
+    </head>
+    <body>
+        <h1>FloodLLM Detection Report</h1>
+        <div class="summary-card">
+            <h2>Analysis Summary</h2>
+            <div class="metric"><strong>Location:</strong> {location}</div>
+            <div class="metric"><strong>Period:</strong> {start_date} to {end_date}</div>
+            <div class="metric"><strong>Flooded Area:</strong> <span class="highlight">{flood_area_ha:,.2f} ha</span></div>
+        </div>
+        <p style="margin-top:40px; color:#777; text-align:center;">Generated on {timestamp}</p>
+    </body>
+    </html>
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(output_html_path)), exist_ok=True)
+    with open(output_html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
 
 try:
     from reportlab.lib.pagesizes import letter, A4

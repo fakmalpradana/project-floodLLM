@@ -1,10 +1,13 @@
 """FloodLLM FastAPI Application."""
 import asyncio
+import json
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+import google.generativeai as genai
+import numpy as np
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -12,14 +15,14 @@ from pydantic import BaseModel
 
 from ..utils.config import settings
 from ..utils.geocode import geocode_location
-from ..utils.llm import LLMPromptHandler
+from ..utils.llm import LLMPromptHandler, get_parsing_messages, SYSTEM_PROMPT
 from ..data.sentinel import SentinelDownloader
 from ..data.rainfall import RainfallDownloader
-from ..processing.sar_processor import SARProcessor
-from ..processing.optical import OpticalProcessor
+from ..processing.sar_processor import SARProcessor, detect_water_sar
+from ..processing.optical import OpticalProcessor, calculate_ndwi_and_mask
 from ..processing.risk_model import FloodRiskModel
 from ..visualization.mapper import FloodMapper
-from ..visualization.reporter import ReportGenerator
+from ..visualization.reporter import ReportGenerator, calculate_area, generate_flood_report
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -135,23 +138,37 @@ async def process_flood_request(
         jobs[job_id]["progress"] = 10
         jobs[job_id]["status"] = "parsing_prompt"
 
-        # Step 1: Parse natural language prompt
-        parsed = llm_handler.parse_prompt(prompt)
+        # Step 1: Parse via get_parsing_messages -> Gemini -> JSON
+        messages = get_parsing_messages(prompt)
+        parsed = {}
+        if llm_handler.model:
+            try:
+                parse_model = genai.GenerativeModel(
+                    "gemini-2.0-flash-exp",
+                    system_instruction=messages[0]["content"]
+                )
+                response = parse_model.generate_content(messages[1]["content"])
+                parsed = json.loads(response.text)
+            except Exception as e:
+                print(f"Gemini structured parse error: {e}")
+                parsed = llm_handler._simple_parse(prompt)
+        else:
+            parsed = llm_handler._simple_parse(prompt)
 
-        location = override_location or parsed.get("location", "unknown")
-        date_start = override_date_start or parsed.get("date_start", "last 7 days")
-        date_end = override_date_end or parsed.get("date_end", "today")
-        task_type = parsed.get("task_type", "flood_detection")
+        location = override_location or parsed.get("location_name") or parsed.get("location", "unknown")
+        bbox = parsed.get("bbox") or None
+        date_start = override_date_start or parsed.get("start_date") or parsed.get("date_start", "last 7 days")
+        date_end = override_date_end or parsed.get("end_date") or parsed.get("date_end", "today")
 
         jobs[job_id]["parsed"] = parsed
 
-        # Step 2: Geocode location
+        # Step 2: Geocode if bbox not in parsed result
         jobs[job_id]["status"] = "geocoding"
         jobs[job_id]["progress"] = 20
 
-        bbox = await geocode_location(location)
         if not bbox:
-            # Default to Jakarta if geocoding fails
+            bbox = await geocode_location(location)
+        if not bbox:
             bbox = (106.5, -6.5, 107.0, -6.0)
             jobs[job_id]["warning"] = "Geocoding failed, using default location"
 
@@ -190,42 +207,39 @@ async def process_flood_request(
 
         jobs[job_id]["rainfall"] = rainfall_data
 
-        # Step 5: Process SAR data for flood detection
+        # Step 5: Process SAR data with detect_water_sar -> calculate_area
         jobs[job_id]["status"] = "processing_flood_detection"
         jobs[job_id]["progress"] = 60
 
-        flood_results = None
-        flood_mask = None
+        water_mask = None
+        flood_area_ha = 0.0
 
         if sentinel1_data:
             for s1_image in sentinel1_data:
-                result = sar_processor.process(
-                    filepath=s1_image["filepath"],
-                    bbox=bbox
-                )
-                if result:
-                    flood_results = result
-                    # Load mask for visualization (simplified)
-                    flood_mask = None  # Would load from result
+                try:
+                    water_mask, flood_profile = detect_water_sar(s1_image["filepath"])
+                    flood_area_ha = calculate_area(water_mask, flood_profile["transform"])
+                    break
+                except Exception as e:
+                    print(f"SAR processing error for {s1_image['filepath']}: {e}")
 
-        jobs[job_id]["flood_detection"] = flood_results
+        flood_area_km2 = flood_area_ha / 100.0
+        jobs[job_id]["flood_detection"] = {"flood_area_ha": flood_area_ha, "flood_area_km2": flood_area_km2}
 
-        # Step 6: Validate with optical data
+        # Step 6: Validate with optical via calculate_ndwi_and_mask
         jobs[job_id]["status"] = "validating_with_optical"
         jobs[job_id]["progress"] = 70
 
-        validation_result = None
-        if sentinel2_data and flood_mask is not None:
+        ndwi_mask = None
+        if sentinel2_data:
             for s2_image in sentinel2_data:
-                validation = optical_processor.validate_flood_detection(
-                    sar_flood_mask=flood_mask,
-                    optical_filepath=s2_image["filepath"]
-                )
-                if validation.get("valid"):
-                    validation_result = validation
+                try:
+                    ndwi_mask, _ = calculate_ndwi_and_mask(s2_image["filepath"])
                     break
+                except Exception as e:
+                    print(f"Optical processing error for {s2_image['filepath']}: {e}")
 
-        jobs[job_id]["validation"] = validation_result
+        jobs[job_id]["validation"] = {"ndwi_mask_computed": ndwi_mask is not None}
 
         # Step 7: Generate risk assessment
         jobs[job_id]["status"] = "generating_risk_assessment"
@@ -235,7 +249,7 @@ async def process_flood_request(
         risk_result = risk_model.predict_risk(
             bbox=bbox,
             rainfall_mm=rainfall_mm,
-            flood_extent=flood_mask
+            flood_extent=water_mask
         )
 
         jobs[job_id]["risk_assessment"] = risk_result
@@ -244,72 +258,36 @@ async def process_flood_request(
         jobs[job_id]["status"] = "generating_map"
         jobs[job_id]["progress"] = 85
 
-        # Create simplified flood mask for visualization
-        if flood_results:
-            dummy_mask = None  # Would create from actual data
-        else:
-            import numpy as np
-            dummy_mask = np.zeros((100, 100), dtype=bool)
-
+        display_mask = water_mask if water_mask is not None else np.zeros((100, 100), dtype=bool)
         map_result = flood_mapper.create_flood_map(
-            flood_mask=dummy_mask if dummy_mask is not None else np.zeros((100, 100)),
+            flood_mask=display_mask,
             bbox=bbox,
             job_id=job_id,
             overlay_data={
                 "rainfall_mm": rainfall_mm,
-                "affected_buildings": flood_results.get("statistics", {}).get("flooded_pixels", 0) // 10 if flood_results else 0
+                "affected_buildings": int(flood_area_km2 * 50)
             }
         )
 
         jobs[job_id]["map"] = map_result
 
-        # Step 9: Generate report
+        # Step 9: Generate HTML report via generate_flood_report
         jobs[job_id]["status"] = "generating_report"
         jobs[job_id]["progress"] = 90
 
-        # Calculate affected infrastructure (simplified)
-        flood_area = flood_results.get("statistics", {}).get("flood_area_km2", 10) if flood_results else 10
-
-        report_data = {
-            "location": location,
-            "date_range": f"{date_start} to {date_end}",
-            "flood_area_km2": flood_area,
-            "affected_buildings": int(flood_area * 50),  # Estimate
-            "affected_roads_km": round(flood_area * 2, 1),
-            "agricultural_km2": round(flood_area * 0.3, 2),
-            "rainfall_mm": rainfall_mm,
-            "risk_assessment": {
-                "level": risk_result.get("risk_statistics", {}).get("mean_risk", 0.5),
-                "high_risk_pct": risk_result.get("risk_statistics", {}).get("high_risk_area_pct", 20),
-                "moderate_risk_pct": risk_result.get("risk_statistics", {}).get("moderate_risk_area_pct", 30),
-                "low_risk_pct": risk_result.get("risk_statistics", {}).get("low_risk_area_pct", 50)
-            },
-            "recommendations": risk_result.get("recommendations", []),
-            "narrative": llm_handler.generate_report(
-                location=location,
-                date_range=f"{date_start} to {date_end}",
-                flood_area_km2=flood_area,
-                affected_infrastructure={
-                    "buildings": int(flood_area * 50),
-                    "roads_km": round(flood_area * 2, 1),
-                    "agricultural_km2": round(flood_area * 0.3, 2)
-                },
-                rainfall_data=rainfall_data
-            )
-        }
-
-        report_path = report_generator.generate_report(report_data, job_id)
-        jobs[job_id]["report"] = report_path
-        jobs[job_id]["report_data"] = report_data
+        report_html_path = str(settings.output_dir / "reports" / f"flood_report_{job_id}.html")
+        generate_flood_report(location, date_start, date_end, flood_area_ha, report_html_path)
+        jobs[job_id]["report"] = report_html_path
 
         # Complete
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["progress"] = 100
         jobs[job_id]["completed_at"] = datetime.now().isoformat()
         jobs[job_id]["result"] = {
-            "flood_area_km2": flood_area,
-            "map_path": map_result.get("map_path"),
-            "report_path": report_path,
+            "flood_area_km2": flood_area_km2,
+            "flood_area_ha": flood_area_ha,
+            "map_path": map_result.get("map_path") if map_result else None,
+            "report_path": report_html_path,
             "risk_level": risk_result.get("risk_statistics", {}).get("mean_risk", 0)
         }
 

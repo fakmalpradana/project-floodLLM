@@ -23,6 +23,56 @@ except ImportError:
 from ..utils.config import settings
 
 
+def detect_water_sar(input_path: str, output_path: str = None) -> tuple:
+    """Detects water from Sentinel-1 GRD imagery using Otsu's dynamic thresholding."""
+    import rasterio as _rasterio
+    from skimage.filters import threshold_otsu as _threshold_otsu
+    from scipy.ndimage import median_filter as _median_filter
+
+    with _rasterio.open(input_path) as src:
+        sar_data = src.read(1).astype(np.float32)
+        profile = src.profile
+        nodata = src.nodata
+
+    valid_mask = ~np.isnan(sar_data)
+    if nodata is not None:
+        valid_mask &= (sar_data != nodata)
+    valid_data = sar_data[valid_mask]
+
+    if valid_data.size == 0:
+        raise ValueError("No valid data found in SAR image.")
+
+    # Convert to dB if not already (heuristic check for linear values)
+    if np.nanmax(valid_data) < 100 and np.nanmin(valid_data) >= 0:
+        valid_data_db = 10 * np.log10(np.clip(valid_data, 1e-6, None))
+        sar_data_db = np.full_like(sar_data, np.nan, dtype=np.float32)
+        sar_data_db[valid_mask] = valid_data_db
+    else:
+        sar_data_db = sar_data
+        valid_data_db = valid_data
+
+    # Median filter to reduce speckle noise
+    filtered_data = _median_filter(sar_data_db, size=3)
+    filtered_valid_data = filtered_data[valid_mask]
+
+    try:
+        otsu_val = _threshold_otsu(filtered_valid_data)
+    except Exception:
+        otsu_val = -15.0  # Fallback empirical threshold
+
+    water_mask = np.zeros_like(sar_data, dtype=np.uint8)
+    water_mask[valid_mask & (filtered_data < otsu_val)] = 1
+
+    profile.update({'dtype': 'uint8', 'count': 1, 'nodata': 255})
+    water_mask[~valid_mask] = 255
+
+    if output_path:
+        with _rasterio.open(output_path, 'w', **profile) as dst:
+            dst.write(water_mask, 1)
+
+    return water_mask, profile
+
+
 class SARProcessor:
     """Process Sentinel-1 SAR data for flood detection."""
 
