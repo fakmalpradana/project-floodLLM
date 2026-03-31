@@ -1,0 +1,36 @@
+# ── Stage 1: build deps with GDAL system libraries ────────────────────────
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Install GDAL and geospatial system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gdal-bin \
+    libgdal-dev \
+    libgeos-dev \
+    libproj-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps first (layer cache)
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# Copy application source
+COPY app/ ./app/
+COPY cli.py .
+
+# Create output/data directories
+RUN mkdir -p data/sentinel data/rainfall \
+             output/maps output/reports output/risk_maps \
+             output/vector_data output/optical_analysis output/flood_masks
+
+# ── Runtime ───────────────────────────────────────────────────────────────
+EXPOSE 8000
+
+# Cloud Run injects PORT; fall back to 8000 locally
+CMD ["sh", "-c", "uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

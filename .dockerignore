@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+
+# Python caches
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+
+# Frontend build artefacts (built inside Docker)
+frontend/node_modules
+frontend/dist
+
+# Data / outputs (mounted at runtime, not baked into image)
+data/
+output/
+
+# Dev / test files
+.env
+*.env.local
+tests/
+notebooks/
+docs/
+run_test_phase2.py
+run_phase3.py
+test_output.txt
+
+# IDE
+.vscode
+.idea
+.DS_Store

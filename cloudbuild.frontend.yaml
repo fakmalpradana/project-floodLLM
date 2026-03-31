@@ -1,0 +1,18 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'Dockerfile.frontend'
+      - '--build-arg'
+      - 'VITE_API_URL=$_BACKEND_URL'
+      - '-t'
+      - '$_IMAGE'
+      - '.'
+
+images:
+  - '$_IMAGE'
+
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
