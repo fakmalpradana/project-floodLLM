@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # GCP
     gcp_project_id: str = ""
     gcp_bucket_name: str = ""
+    google_application_credentials: str = ""
+    gcp_service_account_email: str = ""
 
     # App settings
     app_env: str = "development"
@@ -35,6 +37,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"  # silently drop any unrecognised env vars
 
 
 settings = Settings()

@@ -1,5 +1,4 @@
 """FloodLLM FastAPI Application."""
-import asyncio
 import json
 import uuid
 from datetime import datetime
@@ -10,7 +9,7 @@ import google.generativeai as genai
 import numpy as np
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from ..utils.config import settings
@@ -21,8 +20,11 @@ from ..data.rainfall import RainfallDownloader
 from ..processing.sar_processor import SARProcessor, detect_water_sar
 from ..processing.optical import OpticalProcessor, calculate_ndwi_and_mask
 from ..processing.risk_model import FloodRiskModel
-from ..visualization.mapper import FloodMapper
-from ..visualization.reporter import ReportGenerator, calculate_area, generate_flood_report
+from ..processing.change_detection import ChangeDetector
+from ..processing.vector_generator import VectorGenerator
+from ..visualization.vector_map import VectorFloodMap
+from ..visualization.satellite_report import SatelliteFloodReport
+from ..visualization.reporter import calculate_area
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -47,8 +49,10 @@ rainfall_downloader = RainfallDownloader()
 sar_processor = SARProcessor()
 optical_processor = OpticalProcessor()
 risk_model = FloodRiskModel()
-flood_mapper = FloodMapper()
-report_generator = ReportGenerator()
+change_detector = ChangeDetector()
+vector_generator = VectorGenerator()
+vector_map = VectorFloodMap()
+satellite_reporter = SatelliteFloodReport()
 
 # Job storage (in production, use Redis/database)
 jobs: Dict[str, Dict[str, Any]] = {}
@@ -241,54 +245,142 @@ async def process_flood_request(
 
         jobs[job_id]["validation"] = {"ndwi_mask_computed": ndwi_mask is not None}
 
-        # Step 7: Generate risk assessment
-        jobs[job_id]["status"] = "generating_risk_assessment"
-        jobs[job_id]["progress"] = 80
-
         rainfall_mm = rainfall_data.get("total_mm", 50) if rainfall_data else 50
+
+        # Step 7: Change detection (S1 + S2 fusion)
+        jobs[job_id]["status"] = "generating_risk_assessment"
+        jobs[job_id]["progress"] = 72
+
+        change_result = change_detector.compute_flood_change(
+            baseline_ndwi=None,
+            flood_ndwi=ndwi_mask,
+            bbox=tuple(bbox)
+        )
+        severity = change_detector.compute_flood_severity(
+            flood_area_km2=change_result.get("new_flood_area_km2", flood_area_km2)
+        )
+        jobs[job_id]["change_detection"] = change_result
+        jobs[job_id]["severity"] = severity
+
+        # Step 8a: Flood extent vector layer
+        jobs[job_id]["progress"] = 78
+        analysis_date = datetime.now().strftime("%Y-%m-%d")
+        flood_extent_result = vector_generator.generate_flood_extent_vector(
+            flood_mask=water_mask,
+            bbox=tuple(bbox),
+            job_id=job_id,
+            source="Sentinel-1 SAR + Sentinel-2 Optical",
+            confidence=change_result.get("fusion", {}).get("confidence", "MEDIUM"),
+            date_detected=analysis_date
+        )
+        # Use vector-derived area when available
+        if flood_extent_result.get("total_area_km2", 0) > 0:
+            flood_area_km2 = flood_extent_result["total_area_km2"]
+            flood_area_ha = flood_area_km2 * 100
+
+        # Step 8b: Risk zone vector layer
+        jobs[job_id]["progress"] = 82
+        risk_zones_result = vector_generator.generate_risk_zones(
+            bbox=tuple(bbox),
+            risk_map=None,
+            flood_extent_geojson=flood_extent_result.get("geojson"),
+            job_id=job_id
+        )
+
+        # Step 8c: Impact buffer zones vector layer
+        jobs[job_id]["progress"] = 85
+        impact_zones_result = vector_generator.generate_impact_zones(
+            flood_extent_geojson=flood_extent_result.get("geojson"),
+            job_id=job_id,
+            date_analysis=analysis_date
+        )
+
+        # Step 8d: District-level statistics vector layer
+        jobs[job_id]["progress"] = 88
+        districts_result = vector_generator.generate_district_statistics(
+            flood_extent_geojson=flood_extent_result.get("geojson"),
+            risk_zones_geojson=risk_zones_result.get("geojson"),
+            bbox=tuple(bbox),
+            job_id=job_id
+        )
+
+        # Step 9: Generate interactive vector map (4 layers)
+        jobs[job_id]["status"] = "generating_map"
+        jobs[job_id]["progress"] = 91
+
+        analysis_stats = {
+            "flood_area_km2": flood_extent_result.get("total_area_km2", flood_area_km2),
+            "high_risk_km2": risk_zones_result.get("high_risk_km2", 0),
+            "medium_risk_km2": risk_zones_result.get("medium_risk_km2", 0),
+            "low_risk_km2": risk_zones_result.get("low_risk_km2", 0),
+            "total_population_exposed": districts_result.get("total_population_exposed", 0),
+            "districts_affected_count": districts_result.get("district_count_affected", 0),
+            "confidence": change_result.get("fusion", {}).get("confidence", "HIGH"),
+        }
+        map_result = vector_map.create_vector_map(
+            job_id=job_id,
+            bbox=tuple(bbox),
+            flood_extent_geojson=flood_extent_result.get("geojson"),
+            risk_zones_geojson=risk_zones_result.get("geojson"),
+            impact_zones_geojson=impact_zones_result.get("geojson"),
+            districts_geojson=districts_result.get("geojson"),
+            analysis_stats=analysis_stats,
+            title=f"Flood Risk & Impact Assessment — {location}",
+            analysis_period=f"{date_start} to {date_end}"
+        )
+        jobs[job_id]["map"] = map_result
+
+        # Step 10: Generate comprehensive satellite analysis report
+        jobs[job_id]["status"] = "generating_report"
+        jobs[job_id]["progress"] = 95
+
+        report_path = satellite_reporter.generate(
+            job_id=job_id,
+            location=location,
+            analysis_period=f"{date_start} to {date_end}",
+            bbox=tuple(bbox),
+            flood_extent_result=flood_extent_result,
+            risk_zones_result=risk_zones_result,
+            impact_zones_result=impact_zones_result,
+            districts_result=districts_result,
+            change_detection_result=change_result,
+            map_path=map_result.get("map_path"),
+            rainfall_mm=rainfall_mm
+        )
+        jobs[job_id]["report"] = report_path
+
+        # Risk summary from FloodRiskModel (still used for risk_level scalar)
         risk_result = risk_model.predict_risk(
-            bbox=bbox,
+            bbox=tuple(bbox),
             rainfall_mm=rainfall_mm,
             flood_extent=water_mask
         )
-
-        jobs[job_id]["risk_assessment"] = risk_result
-
-        # Step 8: Generate map
-        jobs[job_id]["status"] = "generating_map"
-        jobs[job_id]["progress"] = 85
-
-        display_mask = water_mask if water_mask is not None else np.zeros((100, 100), dtype=bool)
-        map_result = flood_mapper.create_flood_map(
-            flood_mask=display_mask,
-            bbox=bbox,
-            job_id=job_id,
-            overlay_data={
-                "rainfall_mm": rainfall_mm,
-                "affected_buildings": int(flood_area_km2 * 50)
-            }
-        )
-
-        jobs[job_id]["map"] = map_result
-
-        # Step 9: Generate HTML report via generate_flood_report
-        jobs[job_id]["status"] = "generating_report"
-        jobs[job_id]["progress"] = 90
-
-        report_html_path = str(settings.output_dir / "reports" / f"flood_report_{job_id}.html")
-        generate_flood_report(location, date_start, date_end, flood_area_ha, report_html_path)
-        jobs[job_id]["report"] = report_html_path
 
         # Complete
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["progress"] = 100
         jobs[job_id]["completed_at"] = datetime.now().isoformat()
         jobs[job_id]["result"] = {
-            "flood_area_km2": flood_area_km2,
-            "flood_area_ha": flood_area_ha,
-            "map_path": map_result.get("map_path") if map_result else None,
-            "report_path": report_html_path,
-            "risk_level": risk_result.get("risk_statistics", {}).get("mean_risk", 0)
+            "flood_area_km2": round(flood_area_km2, 3),
+            "flood_area_ha": round(flood_area_ha, 1),
+            "map_path": map_result.get("map_path"),
+            "report_path": report_path,
+            "risk_level": risk_result.get("risk_statistics", {}).get("mean_risk", 0),
+            "severity": severity.get("severity", "UNKNOWN"),
+            "flood_extent_features": flood_extent_result.get("feature_count", 0),
+            "risk_zones": {
+                "high_km2": risk_zones_result.get("high_risk_km2", 0),
+                "medium_km2": risk_zones_result.get("medium_risk_km2", 0),
+                "low_km2": risk_zones_result.get("low_risk_km2", 0),
+            },
+            "population_exposed": districts_result.get("total_population_exposed", 0),
+            "districts_affected": districts_result.get("district_count_affected", 0),
+            "vector_layers": {
+                "flood_extent": flood_extent_result.get("path"),
+                "risk_zones": risk_zones_result.get("path"),
+                "impact_zones": impact_zones_result.get("path"),
+                "districts": districts_result.get("path"),
+            }
         }
 
     except Exception as e:
@@ -312,7 +404,10 @@ async def get_status(job_id: str):
         "created_at": job["created_at"],
         "completed_at": job.get("completed_at"),
         "error": job.get("error"),
-        "result": job.get("result")
+        "result": job.get("result"),
+        "parsed": job.get("parsed"),
+        # expose vector layer file paths if available
+        "vector_layers": job.get("result", {}).get("vector_layers") if job.get("result") else None,
     }
 
 
