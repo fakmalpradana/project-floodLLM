@@ -1,0 +1,224 @@
+# ════════════════════════════════════════════════════════════════════════════
+# FloodLLM — CI/CD Pipeline
+# Builds and deploys backend + frontend to GCP Cloud Run on every push to main
+#
+# ── REQUIRED GITHUB SECRETS ────────────────────────────────────────────────
+# Add these under: Repository → Settings → Secrets and variables → Actions
+#
+#   GCP_PROJECT_ID
+#     Your GCP project ID.
+#     Value: floodllm-akmal-23503
+#
+#   GCP_WORKLOAD_IDENTITY_PROVIDER
+#     The full Workload Identity Federation provider name.
+#     Format: projects/<project-number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
+#     How to create (one-time setup, run in your terminal):
+#
+#       PROJECT_ID="floodllm-akmal-23503"
+#       PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+#       REPO="your-github-org/your-repo-name"   # ← replace with your GitHub repo
+#
+#       # 1. Create Workload Identity Pool
+#       gcloud iam workload-identity-pools create "github-pool" \
+#         --location="global" \
+#         --display-name="GitHub Actions Pool" \
+#         --project=$PROJECT_ID
+#
+#       # 2. Create OIDC Provider inside the pool
+#       gcloud iam workload-identity-pools providers create-oidc "github-provider" \
+#         --location="global" \
+#         --workload-identity-pool="github-pool" \
+#         --display-name="GitHub Provider" \
+#         --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+#         --issuer-uri="https://token.actions.githubusercontent.com" \
+#         --project=$PROJECT_ID
+#
+#       # 3. Create a dedicated Service Account for CI
+#       gcloud iam service-accounts create "github-actions-sa" \
+#         --display-name="GitHub Actions Service Account" \
+#         --project=$PROJECT_ID
+#
+#       # 4. Grant the SA the roles it needs
+#       for ROLE in \
+#         roles/run.admin \
+#         roles/artifactregistry.writer \
+#         roles/cloudbuild.builds.editor \
+#         roles/iam.serviceAccountUser \
+#         roles/storage.objectAdmin; do
+#         gcloud projects add-iam-policy-binding $PROJECT_ID \
+#           --member="serviceAccount:github-actions-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+#           --role="$ROLE"
+#       done
+#
+#       # 5. Allow the WIF pool to impersonate the Service Account (scoped to your repo)
+#       gcloud iam service-accounts add-iam-policy-binding \
+#         "github-actions-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+#         --role="roles/iam.workloadIdentityUser" \
+#         --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-pool/attribute.repository/${REPO}" \
+#         --project=$PROJECT_ID
+#
+#       # 6. Print the provider resource name — paste this as GCP_WORKLOAD_IDENTITY_PROVIDER
+#       gcloud iam workload-identity-pools providers describe github-provider \
+#         --location="global" \
+#         --workload-identity-pool="github-pool" \
+#         --project=$PROJECT_ID \
+#         --format='value(name)'
+#
+#   GCP_SERVICE_ACCOUNT
+#     The email of the service account created above.
+#     Value: github-actions-sa@floodllm-akmal-23503.iam.gserviceaccount.com
+#
+#   GOOGLE_API_KEY            — Google Gemini API key
+#   COPERNICUS_USERNAME       — Copernicus Data Space username
+#   COPERNICUS_PASSWORD       — Copernicus Data Space password
+#   NASA_EARTHDATA_USERNAME   — NASA Earthdata username
+#   NASA_EARTHDATA_PASSWORD   — NASA Earthdata password
+# ════════════════════════════════════════════════════════════════════════════
+
+name: Deploy to GCP Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # allow manual triggers from GitHub UI
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: asia-southeast1
+  ARTIFACT_REPO: floodllm
+  BACKEND_SERVICE: floodllm-backend
+  FRONTEND_SERVICE: floodllm-frontend
+
+jobs:
+  # ── 1. Build & deploy backend ─────────────────────────────────────────────
+  deploy-backend:
+    name: Build & Deploy Backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # required for Workload Identity Federation
+
+    outputs:
+      backend_url: ${{ steps.get-url.outputs.url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build & push backend image
+        env:
+          IMAGE: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:${{ github.sha }}
+          LATEST: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:latest
+        run: |
+          docker build -f Dockerfile.backend -t $IMAGE -t $LATEST .
+          docker push $IMAGE
+          docker push $LATEST
+
+      - name: Deploy backend to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.BACKEND_SERVICE }}
+          image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:${{ github.sha }}
+          region: ${{ env.REGION }}
+          flags: >-
+            --allow-unauthenticated
+            --memory=2Gi
+            --cpu=2
+            --timeout=300
+            --concurrency=10
+          env_vars: |
+            GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+            COPERNICUS_USERNAME=${{ secrets.COPERNICUS_USERNAME }}
+            COPERNICUS_PASSWORD=${{ secrets.COPERNICUS_PASSWORD }}
+            NASA_EARTHDATA_USERNAME=${{ secrets.NASA_EARTHDATA_USERNAME }}
+            NASA_EARTHDATA_PASSWORD=${{ secrets.NASA_EARTHDATA_PASSWORD }}
+            GCP_PROJECT_ID=${{ env.PROJECT_ID }}
+            APP_ENV=production
+
+      - name: Get backend URL
+        id: get-url
+        run: |
+          URL=$(gcloud run services describe ${{ env.BACKEND_SERVICE }} \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --format 'value(status.url)')
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "Backend URL: $URL"
+
+  # ── 2. Build & deploy frontend ────────────────────────────────────────────
+  deploy-frontend:
+    name: Build & Deploy Frontend
+    runs-on: ubuntu-latest
+    needs: deploy-backend   # frontend build needs the backend URL
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build & push frontend image
+        env:
+          IMAGE: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/frontend:${{ github.sha }}
+          LATEST: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/frontend:latest
+          BACKEND_URL: ${{ needs.deploy-backend.outputs.backend_url }}
+        run: |
+          docker build \
+            -f Dockerfile.frontend \
+            --build-arg VITE_API_URL=$BACKEND_URL \
+            -t $IMAGE \
+            -t $LATEST \
+            .
+          docker push $IMAGE
+          docker push $LATEST
+
+      - name: Deploy frontend to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.FRONTEND_SERVICE }}
+          image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/frontend:${{ github.sha }}
+          region: ${{ env.REGION }}
+          flags: >-
+            --allow-unauthenticated
+            --memory=512Mi
+            --cpu=1
+            --port=8080
+
+      - name: Print live URLs
+        run: |
+          FRONTEND_URL=$(gcloud run services describe ${{ env.FRONTEND_SERVICE }} \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --format 'value(status.url)')
+          echo "========================================"
+          echo " FloodLLM deployed successfully!"
+          echo "  Frontend : $FRONTEND_URL"
+          echo "  Backend  : ${{ needs.deploy-backend.outputs.backend_url }}"
+          echo "========================================"
