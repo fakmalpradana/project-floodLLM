@@ -1,0 +1,48 @@
+# ── Files and directories to EXCLUDE from gcloud builds submit ────────────
+# This file is used by `gcloud builds submit` and is equivalent to
+# .dockerignore for Cloud Build source uploads.
+#
+# IMPORTANT: Use leading `/` to anchor patterns to the repo root.
+# Bare `data/` would match app/data/ too — we only want /data/ excluded.
+
+# Git metadata
+.git
+.gitignore
+.gcloudignore
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Raw satellite data (top-level only)
+/data/
+
+# Generated outputs (top-level only)
+/output/
+
+# Frontend build artefacts (built inside Docker)
+frontend/node_modules/
+frontend/dist/
+
+# Dev / test files
+.env
+*.env.local
+tests/
+notebooks/
+docs/
+run_test_phase2.py
+run_phase3.py
+test_output.txt
+
+# CI artefacts
+.github/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store

@@ -16,23 +16,25 @@ ENV/
 *.swo
 *~
 
-# Data
-data/*.tiff
-data/*.nc
-data/*.h5
-output/*.tiff
-output/*.png
+# Raw satellite data files (anchored to repo root — does NOT exclude app/data/)
+/data/*.tiff
+/data/*.nc
+/data/*.h5
+/data/sentinel/
+/data/rainfall/
 
-# Reports (keep templates)
-output/reports/*.pdf
-output/reports/*.html
-
-# Maps
-output/maps/*.html
+# Generated outputs (anchored to repo root — does NOT exclude app/visualization/ etc.)
+/output/
+/output/*.tiff
+/output/*.png
+/output/reports/*.pdf
+/output/reports/*.html
+/output/maps/*.html
 
 # Environment
 .env
 *.env.local
+.env.*.local
 
 # Jupyter
 .ipynb_checkpoints
@@ -43,8 +45,9 @@ Thumbs.db
 
 # Logs
 *.log
-.env.*.local
-output/
-data/
+
+# Python build artefacts
 *.pyc
 *.egg-info/
+dist/
+build/
