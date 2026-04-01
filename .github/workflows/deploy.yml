@@ -1,160 +1,129 @@
 # ════════════════════════════════════════════════════════════════════════════
-# FloodLLM — CI/CD Pipeline
-# Builds and deploys backend + frontend to GCP Cloud Run on every push to main.
+# FloodLLM — Automated CI/CD Pipeline
+# Triggers on every push to `main` and on manual workflow_dispatch.
 #
-# ── HOW TO AUTHENTICATE (Workload Identity Federation — keyless, best practice)
+# Architecture:
+#   Job 1 (deploy-backend)  → build + push BE image → deploy Cloud Run
+#   Job 2 (deploy-frontend) → build + push FE image → deploy Cloud Run
+#   Job 2 waits for Job 1 to capture the live backend URL as a build-arg.
 #
-#   Run the one-time setup below in your terminal, then add the 8 secrets
-#   listed in the "REQUIRED GITHUB SECRETS" section to your repo.
+# Authentication: Workload Identity Federation (keyless — no long-lived keys)
+#   The WIF provider and service account are stored as GitHub Secrets and
+#   were provisioned automatically by the Phase 1 bootstrap script.
 #
-# ── ONE-TIME GCP SETUP (run once from your local machine) ──────────────────
-#
-#   export PROJECT_ID="floodllm-akmal-23503"
-#   export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID \
-#     --format='value(projectNumber)')
-#   export REPO="your-github-org/your-repo-name"   # ← change this
-#
-#   # 1. Create a Workload Identity Pool
-#   gcloud iam workload-identity-pools create "github-pool" \
-#     --location="global" \
-#     --display-name="GitHub Actions Pool" \
-#     --project=$PROJECT_ID
-#
-#   # 2. Create an OIDC Provider inside the pool
-#   gcloud iam workload-identity-pools providers create-oidc "github-provider" \
-#     --location="global" \
-#     --workload-identity-pool="github-pool" \
-#     --display-name="GitHub Provider" \
-#     --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
-#     --issuer-uri="https://token.actions.githubusercontent.com" \
-#     --project=$PROJECT_ID
-#
-#   # 3. Create the CI Service Account
-#   gcloud iam service-accounts create "github-actions-sa" \
-#     --display-name="GitHub Actions Service Account" \
-#     --project=$PROJECT_ID
-#
-#   # 4. Grant it the required IAM roles
-#   for ROLE in \
-#     roles/run.admin \
-#     roles/artifactregistry.writer \
-#     roles/cloudbuild.builds.editor \
-#     roles/iam.serviceAccountUser \
-#     roles/storage.objectAdmin; do
-#     gcloud projects add-iam-policy-binding $PROJECT_ID \
-#       --member="serviceAccount:github-actions-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
-#       --role="$ROLE"
-#   done
-#
-#   # 5. Allow WIF to impersonate the Service Account (scoped to your repo)
-#   gcloud iam service-accounts add-iam-policy-binding \
-#     "github-actions-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
-#     --role="roles/iam.workloadIdentityUser" \
-#     --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-pool/attribute.repository/${REPO}" \
-#     --project=$PROJECT_ID
-#
-#   # 6. Print the WIF Provider name → use as WIF_PROVIDER secret
-#   gcloud iam workload-identity-pools providers describe github-provider \
-#     --location="global" \
-#     --workload-identity-pool="github-pool" \
-#     --project=$PROJECT_ID \
-#     --format='value(name)'
-#   # Example output:
-#   # projects/574571002226/locations/global/workloadIdentityPools/github-pool/providers/github-provider
-#
-# ── REQUIRED GITHUB SECRETS ────────────────────────────────────────────────
-#   Go to: Repository → Settings → Secrets and variables → Actions → New secret
-#
-#   Secret name              │ Value / where to get it
-#   ─────────────────────────┼──────────────────────────────────────────────────
-#   WIF_PROVIDER             │ Output of step 6 above (full resource name)
-#                            │ e.g. projects/574571002226/locations/global/
-#                            │      workloadIdentityPools/github-pool/providers/github-provider
-#   WIF_SERVICE_ACCOUNT      │ github-actions-sa@floodllm-akmal-23503.iam.gserviceaccount.com
-#   GCP_PROJECT_ID           │ floodllm-akmal-23503
-#   GOOGLE_API_KEY           │ Your Google Gemini API key
-#   COPERNICUS_USERNAME      │ Your Copernicus Data Space username
-#   COPERNICUS_PASSWORD      │ Your Copernicus Data Space password
-#   NASA_EARTHDATA_USERNAME  │ Your NASA Earthdata username
-#   NASA_EARTHDATA_PASSWORD  │ Your NASA Earthdata password
-#
+# Required GitHub Secrets (all auto-populated by bootstrap):
+#   WIF_PROVIDER            — WIF provider resource name
+#   WIF_SERVICE_ACCOUNT     — CI service account email
+#   GCP_PROJECT_ID          — GCP project ID
+#   GCP_REGION              — Cloud Run region
+#   GOOGLE_API_KEY          — Gemini API key
+#   COPERNICUS_USERNAME/PASSWORD  — Sentinel data credentials
+#   NASA_EARTHDATA_USERNAME/PASSWORD  — GPM rainfall credentials
 # ════════════════════════════════════════════════════════════════════════════
 
-name: Deploy to GCP Cloud Run
+name: 🚀 Deploy FloodLLM to GCP Cloud Run
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:   # allow manual re-runs from GitHub UI
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force full rebuild (ignore cache)'
+        required: false
+        default: 'false'
+        type: boolean
 
-# ── Workflow-level env ──────────────────────────────────────────────────────
+# ── Workflow-level environment ────────────────────────────────────────────
 env:
   PROJECT_ID:       ${{ secrets.GCP_PROJECT_ID }}
-  REGION:           asia-southeast1
+  REGION:           ${{ secrets.GCP_REGION }}
   ARTIFACT_REPO:    floodllm
   BACKEND_SERVICE:  floodllm-backend
   FRONTEND_SERVICE: floodllm-frontend
-  # ── Task 3: force all JS actions to run on Node 24 instead of Node 20 ──
-  # This silences the "Node.js 20 deprecation" warnings from actions/checkout,
-  # google-github-actions/auth, google-github-actions/setup-gcloud, etc.
-  # Remove once those actions ship a native Node 24 release.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # ── Fix: Node.js 20 deprecation ──────────────────────────────────────
+  # Forces actions/checkout, google-github-actions/auth, setup-gcloud,
+  # and deploy-cloudrun to execute under Node 24 instead of Node 20.
+  # This eliminates all "Node.js 20 is deprecated" warnings.
+  # Can be removed once each action ships a native Node 24 release.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
-# ── Job 1: Build & deploy backend ──────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
+# JOB 1 — Backend
+# ─────────────────────────────────────────────────────────────────────────
 jobs:
   deploy-backend:
-    name: Build & Deploy Backend
+    name: 🐍 Build & Deploy Backend
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write     # REQUIRED for Workload Identity Federation
+      id-token: write   # Required for Workload Identity Federation
 
     outputs:
       backend_url: ${{ steps.get-url.outputs.url }}
+      image_tag:   ${{ steps.meta.outputs.tag }}
 
     steps:
+      # ── 1. Source code ──────────────────────────────────────────────
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # ── Task 2 fix ──────────────────────────────────────────────────────
-      # The auth action requires EXACTLY ONE of:
-      #   • workload_identity_provider  (WIF — keyless, preferred)
-      #   • credentials_json            (Service Account JSON key)
-      #
-      # Previously the secrets were named GCP_WORKLOAD_IDENTITY_PROVIDER /
-      # GCP_SERVICE_ACCOUNT. If those secrets were not yet created in GitHub,
-      # both resolved to empty strings and the action threw:
-      #   "must specify exactly one of workload_identity_provider or credentials_json"
-      #
-      # Fix: rename to WIF_PROVIDER / WIF_SERVICE_ACCOUNT (shorter, unambiguous)
-      # and add token_format so downstream steps can use the OIDC token.
-      - name: Authenticate to Google Cloud (WIF)
+      # ── 2. GCP Authentication via WIF (keyless) ─────────────────────
+      # Uses WIF_PROVIDER + WIF_SERVICE_ACCOUNT secrets (set by bootstrap).
+      # token_format: access_token exports CLOUDSDK_AUTH_ACCESS_TOKEN so
+      # both gcloud and Docker credential helper work without extra steps.
+      - name: Authenticate to GCP (Workload Identity Federation)
+        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account:            ${{ secrets.WIF_SERVICE_ACCOUNT }}
-          token_format:               access_token   # gives gcloud + docker a usable token
+          token_format:               access_token
 
+      # ── 3. Cloud SDK ─────────────────────────────────────────────────
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
+      # ── 4. Docker → Artifact Registry ───────────────────────────────
       - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
-
-      - name: Build & push backend image
-        env:
-          IMAGE:  ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:${{ github.sha }}
-          LATEST: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:latest
         run: |
-          docker build -f Dockerfile.backend -t "$IMAGE" -t "$LATEST" .
-          docker push "$IMAGE"
-          docker push "$LATEST"
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+          echo "  ✓ Docker configured for ${{ env.REGION }}-docker.pkg.dev"
 
+      # ── 5. Build metadata ─────────────────────────────────────────────
+      - name: Set image tag metadata
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          TAG="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:${SHORT_SHA}"
+          LATEST="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:latest"
+          echo "tag=$TAG"       >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "  Image: $TAG"
+
+      # ── 6. Build + push backend image ────────────────────────────────
+      - name: Build & push backend Docker image
+        run: |
+          echo "Building backend image (SHA: ${{ steps.meta.outputs.short_sha }})..."
+          docker build \
+            -f Dockerfile.backend \
+            -t "${{ steps.meta.outputs.tag }}" \
+            -t "${{ steps.meta.outputs.latest }}" \
+            --label "git-commit=$GITHUB_SHA" \
+            --label "build-date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            .
+          docker push "${{ steps.meta.outputs.tag }}"
+          docker push "${{ steps.meta.outputs.latest }}"
+          echo "  ✓ Pushed: ${{ steps.meta.outputs.tag }}"
+
+      # ── 7. Deploy to Cloud Run ────────────────────────────────────────
       - name: Deploy backend to Cloud Run
+        id: deploy
         uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: ${{ env.BACKEND_SERVICE }}
-          image:   ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:${{ github.sha }}
+          image:   ${{ steps.meta.outputs.tag }}
           region:  ${{ env.REGION }}
           flags: >-
             --allow-unauthenticated
@@ -162,6 +131,8 @@ jobs:
             --cpu=2
             --timeout=300
             --concurrency=10
+            --min-instances=0
+            --max-instances=5
           env_vars: |
             GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
             COPERNICUS_USERNAME=${{ secrets.COPERNICUS_USERNAME }}
@@ -170,22 +141,42 @@ jobs:
             NASA_EARTHDATA_PASSWORD=${{ secrets.NASA_EARTHDATA_PASSWORD }}
             GCP_PROJECT_ID=${{ env.PROJECT_ID }}
             APP_ENV=production
+            LOG_LEVEL=INFO
 
-      - name: Get backend URL
+      # ── 8. Capture live URL ───────────────────────────────────────────
+      - name: Get backend service URL
         id: get-url
         run: |
           URL=$(gcloud run services describe "${{ env.BACKEND_SERVICE }}" \
             --region "${{ env.REGION }}" \
             --project "${{ env.PROJECT_ID }}" \
-            --format 'value(status.url)')
+            --format "value(status.url)")
           echo "url=$URL" >> "$GITHUB_OUTPUT"
-          echo "Backend URL: $URL"
+          echo "  ✓ Backend live at: $URL"
 
-# ── Job 2: Build & deploy frontend ─────────────────────────────────────────
+      # ── 9. Health check ───────────────────────────────────────────────
+      - name: Verify backend health
+        run: |
+          URL="${{ steps.get-url.outputs.url }}"
+          echo "Checking backend health at $URL ..."
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL/" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "  ✓ Health check passed (HTTP $STATUS)"
+              exit 0
+            fi
+            echo "  Attempt $i: HTTP $STATUS — retrying in 10s..."
+            sleep 10
+          done
+          echo "  ⚠ Health check did not return 200 — deployment may still be cold-starting"
+
+# ─────────────────────────────────────────────────────────────────────────
+# JOB 2 — Frontend
+# ─────────────────────────────────────────────────────────────────────────
   deploy-frontend:
-    name: Build & Deploy Frontend
+    name: ⚛️  Build & Deploy Frontend
     runs-on: ubuntu-latest
-    needs: deploy-backend       # must finish first — we embed the backend URL
+    needs: deploy-backend   # Wait for backend URL before building FE
     permissions:
       contents: read
       id-token: write
@@ -194,7 +185,8 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud (WIF)
+      - name: Authenticate to GCP (Workload Identity Federation)
+        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -207,43 +199,77 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
 
-      - name: Build & push frontend image
+      - name: Set image tag metadata
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          TAG="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/frontend:${SHORT_SHA}"
+          LATEST="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/frontend:latest"
+          echo "tag=$TAG"       >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+
+      # VITE_API_URL is baked into the static bundle at build time
+      - name: Build & push frontend Docker image
         env:
-          IMAGE:       ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/frontend:${{ github.sha }}
-          LATEST:      ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/frontend:latest
           BACKEND_URL: ${{ needs.deploy-backend.outputs.backend_url }}
         run: |
+          echo "Backend URL for this build: $BACKEND_URL"
           docker build \
             -f Dockerfile.frontend \
             --build-arg "VITE_API_URL=$BACKEND_URL" \
-            -t "$IMAGE" \
-            -t "$LATEST" \
+            -t "${{ steps.meta.outputs.tag }}" \
+            -t "${{ steps.meta.outputs.latest }}" \
+            --label "git-commit=$GITHUB_SHA" \
+            --label "backend-url=$BACKEND_URL" \
             .
-          docker push "$IMAGE"
-          docker push "$LATEST"
+          docker push "${{ steps.meta.outputs.tag }}"
+          docker push "${{ steps.meta.outputs.latest }}"
+          echo "  ✓ Pushed: ${{ steps.meta.outputs.tag }}"
 
       - name: Deploy frontend to Cloud Run
+        id: deploy
         uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: ${{ env.FRONTEND_SERVICE }}
-          image:   ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/frontend:${{ github.sha }}
+          image:   ${{ steps.meta.outputs.tag }}
           region:  ${{ env.REGION }}
           flags: >-
             --allow-unauthenticated
             --memory=512Mi
             --cpu=1
             --port=8080
+            --min-instances=0
+            --max-instances=3
 
-      - name: Print live URLs
+      # ── Summary ──────────────────────────────────────────────────────
+      - name: Print deployment summary
         run: |
           FRONTEND_URL=$(gcloud run services describe "${{ env.FRONTEND_SERVICE }}" \
             --region "${{ env.REGION }}" \
             --project "${{ env.PROJECT_ID }}" \
-            --format 'value(status.url)')
+            --format "value(status.url)")
           BACKEND_URL="${{ needs.deploy-backend.outputs.backend_url }}"
+
           echo ""
-          echo "╔══════════════════════════════════════════════╗"
-          echo "  FloodLLM deployed successfully!"
-          echo "  Frontend : $FRONTEND_URL"
-          echo "  Backend  : $BACKEND_URL"
-          echo "╚══════════════════════════════════════════════╝"
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║         FloodLLM Deployed Successfully! 🌊           ║"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║  Frontend : $FRONTEND_URL"
+          echo "║  Backend  : $BACKEND_URL"
+          echo "║  Commit   : ${GITHUB_SHA::8}"
+          echo "║  Workflow : $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          echo "╚══════════════════════════════════════════════════════╝"
+
+          # Write to GitHub Step Summary
+          cat >> "$GITHUB_STEP_SUMMARY" << SUMMARY
+          ## 🌊 FloodLLM Deployment Summary
+
+          | | URL |
+          |---|---|
+          | **Frontend** | [$FRONTEND_URL]($FRONTEND_URL) |
+          | **Backend**  | [$BACKEND_URL]($BACKEND_URL) |
+
+          - **Commit**: \`${GITHUB_SHA::8}\`
+          - **Branch**: \`$GITHUB_REF_NAME\`
+          - **Triggered by**: $GITHUB_ACTOR
+          SUMMARY
