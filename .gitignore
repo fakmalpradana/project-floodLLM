@@ -43,3 +43,8 @@ Thumbs.db
 
 # Logs
 *.log
+.env.*.local
+output/
+data/
+*.pyc
+*.egg-info/
