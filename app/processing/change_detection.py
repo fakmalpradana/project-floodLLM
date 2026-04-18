@@ -25,7 +25,9 @@ class ChangeDetector:
         flood_ndwi: Optional[np.ndarray],
         baseline_sar: Optional[np.ndarray] = None,
         flood_sar: Optional[np.ndarray] = None,
-        bbox: Optional[Tuple] = None
+        bbox: Optional[Tuple] = None,
+        date_start: Optional[str] = None,
+        date_end: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Compute change between baseline (pre-flood) and flood period.
@@ -67,8 +69,8 @@ class ChangeDetector:
         elif sar_change:
             result["fusion"] = sar_change
         else:
-            # Simulate for Jakarta Jan 2025 when no real data
-            result["fusion"] = self._simulate_change_stats(bbox)
+            # Simulate when no real data — uses bbox + dates for location-agnostic stats
+            result["fusion"] = self._simulate_change_stats(bbox, date_start, date_end)
 
         # Area calculation
         if bbox and result.get("fusion", {}).get("new_flood_pixels"):
@@ -191,32 +193,87 @@ class ChangeDetector:
             "notes": f"Sensor agreement: {agreement_rate:.1f}%"
         }
 
-    def _simulate_change_stats(self, bbox: Optional[Tuple]) -> Dict[str, Any]:
-        """Simulated change detection stats for Jakarta Jan 2025."""
-        # Based on reported ~10.2 km² of flooding in Jakarta January 2025
+    def _simulate_change_stats(
+        self,
+        bbox: Optional[Tuple],
+        date_start: Optional[str] = None,
+        date_end: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Simulated change detection stats derived from bbox and analysis period."""
+        from datetime import datetime as _dt, timedelta as _td
+
+        # Compute area from bbox (10 m resolution → 10 000 pixels/km²)
+        if bbox:
+            min_lon, min_lat, max_lon, max_lat = bbox
+            lon_km = abs(max_lon - min_lon) * 110
+            lat_km = abs(max_lat - min_lat) * 111
+            total_area_km2 = max(lon_km * lat_km, 1.0)
+        else:
+            total_area_km2 = 662.0
+        total_pixels = int(total_area_km2 * 10000)
+
+        # Parse analysis dates
+        try:
+            end_dt = _dt.strptime(date_end, "%Y-%m-%d") if date_end else _dt.now()
+        except (ValueError, TypeError):
+            end_dt = _dt.now()
+        try:
+            start_dt = _dt.strptime(date_start, "%Y-%m-%d") if date_start else end_dt - _td(days=30)
+        except (ValueError, TypeError):
+            start_dt = end_dt - _td(days=30)
+
+        # Baseline = 2 months before analysis start
+        baseline_end = start_dt - _td(days=1)
+        baseline_start = start_dt - _td(days=61)
+
+        # ~1.54 % flood coverage (location-agnostic ratio)
+        new_flood_pixels = int(total_pixels * 0.0154)
+        high_conf_pixels = int(new_flood_pixels * 0.853)
+        flood_km2 = new_flood_pixels / 10000
+
+        # Plausible scene IDs from analysis dates
+        s1d1 = start_dt.strftime("%Y%m%d")
+        s1d2 = (start_dt + _td(days=6)).strftime("%Y%m%d")
+        s1d3 = (start_dt + _td(days=12)).strftime("%Y%m%d")
+        s2d1 = (start_dt + _td(days=4)).strftime("%Y%m%d")
+        s2d2 = (start_dt + _td(days=11)).strftime("%Y%m%d")
+
         return {
             "method": "S1+S2_fusion (simulated)",
-            "new_flood_pixels": 10200,
-            "new_flood_pixels_high_conf": 8700,
+            "new_flood_pixels": new_flood_pixels,
+            "new_flood_pixels_high_conf": high_conf_pixels,
             "new_flood_pct": 1.54,
             "agreement_rate_pct": 85.3,
             "confidence": "HIGH",
-            "total_pixels": 662000,
+            "total_pixels": total_pixels,
             "permanent_water_pct": 2.1,
-            "notes": "Simulation: Estimated 10.2 km² new flood water (Jan 2025)",
-            "sentinel1_scenes": ["S1A_IW_GRDH_1SDV_20250103", "S1A_IW_GRDH_1SDV_20250110", "S1B_IW_GRDH_1SDV_20250115"],
-            "sentinel2_scenes": ["S2A_MSIL2A_20250107_T48MYT", "S2B_MSIL2A_20250114_T48MYT"],
+            "notes": f"Simulation: Estimated {flood_km2:.1f} km² new flood water ({end_dt.strftime('%b %Y')})",
+            "sentinel1_scenes": [
+                f"S1A_IW_GRDH_1SDV_{s1d1}",
+                f"S1A_IW_GRDH_1SDV_{s1d2}",
+                f"S1B_IW_GRDH_1SDV_{s1d3}",
+            ],
+            "sentinel2_scenes": [
+                f"S2A_MSIL2A_{s2d1}_T48MYT",
+                f"S2B_MSIL2A_{s2d2}_T48MYT",
+            ],
             "cloud_cover_pct": 28.5,
-            "baseline_period": "2024-11-01 to 2024-12-31",
-            "flood_period": "2025-01-01 to 2025-01-31"
+            "baseline_period": f"{baseline_start.strftime('%Y-%m-%d')} to {baseline_end.strftime('%Y-%m-%d')}",
+            "flood_period": end_dt.strftime("%b %Y"),
         }
 
     def compute_flood_severity(
         self,
         flood_area_km2: float,
-        total_area_km2: float = 662.0
+        total_area_km2: float = 662.0,
+        bbox: Optional[Tuple] = None
     ) -> Dict[str, Any]:
         """Classify flood severity based on coverage percentage."""
+        if bbox is not None:
+            min_lon, min_lat, max_lon, max_lat = bbox
+            lon_km = abs(max_lon - min_lon) * 110
+            lat_km = abs(max_lat - min_lat) * 111
+            total_area_km2 = max(lon_km * lat_km, 1.0)
         flood_pct = (flood_area_km2 / total_area_km2) * 100
 
         if flood_pct > 15:

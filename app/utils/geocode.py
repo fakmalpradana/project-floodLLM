@@ -76,8 +76,10 @@ def calculate_bbox_area_km2(bbox: Tuple[float, float, float, float]) -> float:
     min_lon, min_lat, max_lon, max_lat = bbox
 
     # Approximate km per degree
+    import math
     km_per_deg_lat = 111.32
-    km_per_deg_lon = 111.32 * abs(((min_lat + max_lat) / 2) * 3.14159 / 180)
+    center_lat_rad = ((min_lat + max_lat) / 2) * math.pi / 180
+    km_per_deg_lon = 111.32 * abs(math.cos(center_lat_rad))
 
     width_km = (max_lon - min_lon) * km_per_deg_lon
     height_km = (max_lat - min_lat) * km_per_deg_lat

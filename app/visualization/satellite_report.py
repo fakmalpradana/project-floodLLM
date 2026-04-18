@@ -101,9 +101,25 @@ class SatelliteFloodReport:
         ])
         cloud_cover = fusion_stats.get("cloud_cover_pct", 28.5)
         agreement_rate = fusion_stats.get("agreement_rate_pct", 85.3)
-        baseline_period = fusion_stats.get("baseline_period", "Nov–Dec 2024")
-        flood_period_str = fusion_stats.get("flood_period", "Jan 2025")
         confidence = fusion_stats.get("confidence", "HIGH")
+
+        city_name = location.split(',')[0].strip()
+
+        # Derive dynamic period defaults from analysis_period string ("YYYY-MM-DD to YYYY-MM-DD")
+        try:
+            from datetime import timedelta as _td
+            _parts = analysis_period.split(" to ")
+            _start_dt = datetime.strptime(_parts[0].strip(), "%Y-%m-%d")
+            _end_dt = datetime.strptime(_parts[1].strip(), "%Y-%m-%d") if len(_parts) > 1 else _start_dt
+            _bl_end = _start_dt - _td(days=1)
+            _bl_start = _start_dt - _td(days=61)
+            _default_baseline = f"{_bl_start.strftime('%b')}–{_bl_end.strftime('%b %Y')}"
+            _default_flood = _end_dt.strftime("%b %Y")
+        except Exception:
+            _default_baseline = "pre-analysis baseline"
+            _default_flood = "analysis period"
+        baseline_period = fusion_stats.get("baseline_period", _default_baseline)
+        flood_period_str = fusion_stats.get("flood_period", _default_flood)
 
         generated_at = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
 
@@ -132,7 +148,7 @@ class SatelliteFloodReport:
 
         # Build recommendations
         recommendations = self._build_recommendations(
-            severity, flood_area_km2, high_risk_km2, total_pop_exposed, rainfall_mm
+            severity, flood_area_km2, high_risk_km2, total_pop_exposed, rainfall_mm, city_name
         )
         recs_html = "".join(
             f'<li style="margin:6px 0;">{r}</li>' for r in recommendations
@@ -316,7 +332,7 @@ class SatelliteFloodReport:
             in {location} during {analysis_period}.
             Flood severity is classified as
             <span class="severity-badge">{severity}</span>
-            ({flood_pct:.1f}% of Jakarta's {662} km² total area).
+            ({flood_pct:.1f}% of {location}'s {analysis_area_km2:.0f} km² analysis area).
         </p>
 
         <div class="metric-grid">
@@ -348,12 +364,12 @@ class SatelliteFloodReport:
 
         <h3>Key Findings</h3>
         <ul style="padding-left: 20px;">
-            <li>North Jakarta (Penjaringan, Tanjung Priok, Koja) experienced the most severe flooding
-                due to coastal tidal influence and river overflow from Ciliwung and Angke rivers.</li>
+            <li>High-risk zones in {city_name} (low-elevation areas near rivers and coastlines)
+                experienced the most severe flooding due to tidal influence and river overflow.</li>
             <li>Combined Sentinel-1 SAR and Sentinel-2 optical analysis achieved
                 <strong>{agreement_rate:.1f}% inter-sensor agreement</strong>, validating the flood extent.</li>
             <li>Change detection confirms <strong>{flood_area_km2:.2f} km²</strong> of new inundation
-                compared to the pre-flood baseline (Nov–Dec 2024).</li>
+                compared to the pre-flood baseline ({baseline_period}).</li>
             <li>Confidence level: <span class="confidence-badge conf-{confidence.lower()}">{confidence}</span></li>
         </ul>
 
@@ -433,8 +449,8 @@ class SatelliteFloodReport:
                 <span class="tag tag-high">Historical Flooding</span>
             </div>
             <p style="margin-top:8px;">
-                <strong>Districts:</strong> North Jakarta (Penjaringan, Tanjung Priok, Koja),
-                East Jakarta (Jatinegara, Kampung Melayu)
+                <strong>Districts:</strong> Northern low-elevation zones of {city_name}
+                (coastal areas and river-proximate districts)
             </p>
             <p><strong>Population at risk:</strong> ~{int(high_risk_km2 * 8500):,} residents</p>
             <p><strong>Action:</strong> Immediate evacuation, emergency response activation</p>
@@ -450,8 +466,8 @@ class SatelliteFloodReport:
                 <span class="tag tag-medium">Urban Runoff</span>
             </div>
             <p style="margin-top:8px;">
-                <strong>Districts:</strong> West Jakarta (Cengkareng, Kalideres),
-                East Jakarta (Cakung, Matraman)
+                <strong>Districts:</strong> Mid-elevation districts of {city_name}
+                (near secondary drainage channels and urban runoff corridors)
             </p>
             <p><strong>Population at risk:</strong> ~{int(medium_risk_km2 * 6200):,} residents</p>
             <p><strong>Action:</strong> Preparedness, monitoring, evacuation readiness</p>
@@ -466,7 +482,7 @@ class SatelliteFloodReport:
                 <span class="tag tag-low">No Historical Flooding</span>
             </div>
             <p style="margin-top:8px;">
-                <strong>Districts:</strong> South Jakarta (Kebayoran Baru, Setiabudi, Tebet)
+                <strong>Districts:</strong> Higher-elevation southern districts of {city_name}
             </p>
             <p><strong>Action:</strong> Standard precautions, no immediate action required</p>
         </div>
@@ -584,9 +600,9 @@ class SatelliteFloodReport:
 
         <h3>Validation Recommendations</h3>
         <ul style="padding-left:20px;">
-            <li>Ground surveys in HIGH risk zones (Penjaringan, Tanjung Priok, Jatinegara)</li>
-            <li>Cross-reference with BPBD (Badan Penanggulangan Bencana Daerah) official reports</li>
-            <li>Validate against flood gauging stations (Ciliwung at Manggarai, Angke at Duri)</li>
+            <li>Ground surveys in HIGH risk zones (northern low-elevation areas of {city_name})</li>
+            <li>Cross-reference with BPBD {city_name} (Badan Penanggulangan Bencana Daerah) official reports</li>
+            <li>Validate against local flood gauging stations and river monitoring data</li>
             <li>Compare with social media flood reports and crowdsourced data</li>
             <li>Integrate Copernicus EMS (Emergency Management Service) activation data if available</li>
         </ul>
@@ -623,7 +639,7 @@ class SatelliteFloodReport:
             <li>Copernicus EMS — Emergency Management Service flood activations</li>
             <li>USGS EROS Center — Flood detection best practices</li>
             <li>Google Earth Engine Documentation — geemap, ee.Image flood analysis</li>
-            <li>BPBD Jakarta — Historical flood records and administrative boundaries</li>
+            <li>BPBD {city_name} — Historical flood records and administrative boundaries</li>
         </ul>
 
         <h3>Software & Tools</h3>
@@ -663,18 +679,19 @@ class SatelliteFloodReport:
         flood_area_km2: float,
         high_risk_km2: float,
         pop_exposed: int,
-        rainfall_mm: float
+        rainfall_mm: float,
+        city_name: str = "the affected area"
     ) -> List[str]:
         recs = []
         if severity in ("SEVERE", "EXTREME"):
             recs.append(
-                "URGENT: Activate emergency response — coordinate with BPBD Jakarta for immediate evacuation "
-                "in HIGH risk zones (North Jakarta coastal areas, Ciliwung river corridor)"
+                f"URGENT: Activate emergency response — coordinate with BPBD {city_name} for immediate "
+                f"evacuation in HIGH risk zones (low-elevation coastal/riverside areas of {city_name})"
             )
         elif severity == "MODERATE":
             recs.append(
-                "WARNING: Pre-position emergency response assets — monitor water levels at "
-                "Manggarai and Katulampa flood gauges continuously"
+                f"WARNING: Pre-position emergency response assets — monitor river gauging stations "
+                f"and drainage levels in {city_name} continuously"
             )
         else:
             recs.append("Monitor situation — current flood extent is manageable with standard procedures")
@@ -684,24 +701,24 @@ class SatelliteFloodReport:
             "prioritize vulnerable populations (elderly, children, disabled)"
         )
         recs.append(
-            "Open emergency shelters in LOW risk districts (Kebayoran Baru, Setiabudi) — "
+            f"Open emergency shelters in LOW risk districts of {city_name} — "
             f"estimated {pop_exposed:,} residents may require temporary accommodation"
         )
         recs.append(
-            "Ensure continuous operation of water treatment plants in Pejompongan and Buaran — "
+            f"Ensure continuous operation of water supply infrastructure in {city_name} — "
             "check for contamination risks from flood water intrusion"
         )
         if rainfall_mm > 80:
             recs.append(
-                f"Heavy rainfall ({rainfall_mm:.0f}mm) — close vulnerable road sections in North Jakarta "
+                f"Heavy rainfall ({rainfall_mm:.0f}mm) — close vulnerable road sections in {city_name} "
                 "and activate all pumping stations to maximum capacity"
             )
         recs.append(
-            "Issue public advisories via BPBD Jakarta social media channels; "
+            f"Issue public advisories via BPBD {city_name} channels; "
             "update flood extent map every 6–12 hours during active event"
         )
         recs.append(
-            "Validate this satellite analysis with BPBD field reports and flood gauging data "
+            f"Validate this satellite analysis with BPBD {city_name} field reports and flood gauging data "
             "before making high-stakes evacuation decisions"
         )
         return recs

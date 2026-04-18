@@ -279,10 +279,13 @@ async def process_flood_request(
         change_result = change_detector.compute_flood_change(
             baseline_ndwi=None,
             flood_ndwi=ndwi_mask,
-            bbox=tuple(bbox)
+            bbox=tuple(bbox),
+            date_start=date_start,
+            date_end=date_end
         )
         severity = change_detector.compute_flood_severity(
-            flood_area_km2=change_result.get("new_flood_area_km2", flood_area_km2)
+            flood_area_km2=change_result.get("new_flood_area_km2", flood_area_km2),
+            bbox=tuple(bbox)
         )
         jobs[job_id]["change_detection"] = change_result
         jobs[job_id]["severity"] = severity
