@@ -1,6 +1,7 @@
 """Sentinel-1 and Sentinel-2 data download."""
 import os
 import asyncio
+import re
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from pathlib import Path
@@ -261,7 +262,54 @@ class SentinelDownloader:
         now = datetime.utcnow()
 
         # Handle relative dates
-        if date_start in ['last 7 days', 'past week', '1 week']:
+        regex_dt = None
+        if isinstance(date_start, str):
+            # Regex patterns for English and Indonesian
+            # Years
+            m = re.search(r'(\d+)\s*tahun', date_start, re.IGNORECASE) or \
+                re.search(r'last\s*(\d+)\s*year', date_start, re.IGNORECASE) or \
+                re.search(r'(\d+)\s*years?\s*ago', date_start, re.IGNORECASE)
+            if m:
+                regex_dt = now - timedelta(days=int(m.group(1)) * 365)
+            
+            # Months
+            if not regex_dt:
+                m = re.search(r'(\d+)\s*bulan', date_start, re.IGNORECASE) or \
+                    re.search(r'last\s*(\d+)\s*month', date_start, re.IGNORECASE) or \
+                    re.search(r'(\d+)\s*months?\s*ago', date_start, re.IGNORECASE)
+                if m:
+                    regex_dt = now - timedelta(days=int(m.group(1)) * 30)
+            
+            # Weeks
+            if not regex_dt:
+                m = re.search(r'(\d+)\s*minggu', date_start, re.IGNORECASE) or \
+                    re.search(r'last\s*(\d+)\s*week', date_start, re.IGNORECASE) or \
+                    re.search(r'(\d+)\s*weeks?\s*ago', date_start, re.IGNORECASE)
+                if m:
+                    regex_dt = now - timedelta(days=int(m.group(1)) * 7)
+            
+            # Days
+            if not regex_dt:
+                m = re.search(r'(\d+)\s*hari', date_start, re.IGNORECASE) or \
+                    re.search(r'last\s*(\d+)\s*day', date_start, re.IGNORECASE) or \
+                    re.search(r'(\d+)\s*days?\s*ago', date_start, re.IGNORECASE)
+                if m:
+                    regex_dt = now - timedelta(days=int(m.group(1)))
+            
+            # Fixed patterns
+            if not regex_dt:
+                if re.search(r'tahun\s*lalu', date_start, re.IGNORECASE):
+                    regex_dt = now - timedelta(days=365)
+                elif re.search(r'bulan\s*lalu', date_start, re.IGNORECASE):
+                    regex_dt = now - timedelta(days=30)
+                elif re.search(r'minggu\s*lalu', date_start, re.IGNORECASE):
+                    regex_dt = now - timedelta(days=7)
+                elif re.search(r'kemarin', date_start, re.IGNORECASE):
+                    regex_dt = now - timedelta(days=1)
+
+        if regex_dt:
+            date_start = regex_dt
+        elif date_start in ['last 7 days', 'past week', '1 week']:
             date_start = now - timedelta(days=7)
         elif date_start in ['last 14 days', 'past 2 weeks']:
             date_start = now - timedelta(days=14)
@@ -269,8 +317,9 @@ class SentinelDownloader:
             date_start = now - timedelta(days=30)
         else:
             try:
-                date_start = datetime.strptime(date_start, '%Y-%m-%d')
-            except ValueError:
+                if isinstance(date_start, str):
+                    date_start = datetime.strptime(date_start, '%Y-%m-%d')
+            except (ValueError, TypeError):
                 date_start = now - timedelta(days=7)
 
         # Handle end date
@@ -278,8 +327,9 @@ class SentinelDownloader:
             date_end = now
         else:
             try:
-                date_end = datetime.strptime(date_end, '%Y-%m-%d')
-            except ValueError:
+                if isinstance(date_end, str):
+                    date_end = datetime.strptime(date_end, '%Y-%m-%d')
+            except (ValueError, TypeError):
                 date_end = now
 
         return date_start, date_end

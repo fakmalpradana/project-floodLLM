@@ -1,5 +1,6 @@
 """FloodLLM FastAPI Application."""
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -152,16 +153,38 @@ async def process_flood_request(
                     system_instruction=messages[0]["content"]
                 )
                 response = parse_model.generate_content(messages[1]["content"])
-                parsed = json.loads(response.text)
+                raw = response.text.strip()
+                # Strip markdown code fences if Gemini wraps the JSON
+                fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+                if fenced:
+                    raw = fenced.group(1)
+                parsed = json.loads(raw)
             except Exception as e:
                 print(f"Gemini structured parse error: {e}")
                 parsed = llm_handler._simple_parse(prompt)
         else:
             parsed = llm_handler._simple_parse(prompt)
 
-        location = override_location or parsed.get("location_name") or parsed.get("location", "unknown")
-        date_start = override_date_start or parsed.get("start_date") or parsed.get("date_start", "last 7 days")
-        date_end = override_date_end or parsed.get("end_date") or parsed.get("date_end", "today")
+        # Support both field-name conventions (Gemini: location_name/start_date/end_date;
+        # legacy _simple_parse: location/date_start/date_end)
+        location = (
+            override_location
+            or parsed.get("location_name")
+            or parsed.get("location")
+            or "unknown"
+        )
+        date_start = (
+            override_date_start
+            or parsed.get("start_date")
+            or parsed.get("date_start")
+            or "last 7 days"
+        )
+        date_end = (
+            override_date_end
+            or parsed.get("end_date")
+            or parsed.get("date_end")
+            or "today"
+        )
 
         jobs[job_id]["parsed"] = parsed
 
