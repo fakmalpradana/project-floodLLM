@@ -33,100 +33,6 @@ except ImportError:
 from ..utils.config import settings
 
 
-# Jakarta districts with approximate centroids and flood vulnerability
-JAKARTA_DISTRICTS = [
-    {
-        "name": "North Jakarta (Penjaringan)",
-        "kecamatan": "Penjaringan",
-        "population": 163_000,
-        "area_km2": 26.15,
-        "flood_vulnerability": "HIGH",
-        "centroid": [106.7397, -6.1127],
-        "bbox": [106.70, -6.18, 106.79, -6.05]
-    },
-    {
-        "name": "North Jakarta (Tanjung Priok)",
-        "kecamatan": "Tanjung Priok",
-        "population": 143_000,
-        "area_km2": 30.05,
-        "flood_vulnerability": "HIGH",
-        "centroid": [106.8689, -6.1127],
-        "bbox": [106.83, -6.17, 106.91, -6.06]
-    },
-    {
-        "name": "North Jakarta (Koja)",
-        "kecamatan": "Koja",
-        "population": 240_000,
-        "area_km2": 12.94,
-        "flood_vulnerability": "HIGH",
-        "centroid": [106.9022, -6.1268],
-        "bbox": [106.88, -6.16, 106.93, -6.09]
-    },
-    {
-        "name": "West Jakarta (Cengkareng)",
-        "kecamatan": "Cengkareng",
-        "population": 521_000,
-        "area_km2": 26.36,
-        "flood_vulnerability": "MEDIUM",
-        "centroid": [106.7313, -6.1638],
-        "bbox": [106.70, -6.20, 106.77, -6.13]
-    },
-    {
-        "name": "West Jakarta (Kalideres)",
-        "kecamatan": "Kalideres",
-        "population": 302_000,
-        "area_km2": 29.98,
-        "flood_vulnerability": "MEDIUM",
-        "centroid": [106.7023, -6.1509],
-        "bbox": [106.67, -6.19, 106.74, -6.12]
-    },
-    {
-        "name": "Central Jakarta (Gambir)",
-        "kecamatan": "Gambir",
-        "population": 73_000,
-        "area_km2": 7.67,
-        "flood_vulnerability": "LOW",
-        "centroid": [106.8196, -6.1670],
-        "bbox": [106.80, -6.19, 106.84, -6.15]
-    },
-    {
-        "name": "Central Jakarta (Senen)",
-        "kecamatan": "Senen",
-        "population": 91_000,
-        "area_km2": 4.22,
-        "flood_vulnerability": "LOW",
-        "centroid": [106.8458, -6.1754],
-        "bbox": [106.83, -6.19, 106.86, -6.16]
-    },
-    {
-        "name": "East Jakarta (Jatinegara)",
-        "kecamatan": "Jatinegara",
-        "population": 210_000,
-        "area_km2": 10.58,
-        "flood_vulnerability": "MEDIUM",
-        "centroid": [106.8781, -6.2163],
-        "bbox": [106.85, -6.25, 106.91, -6.19]
-    },
-    {
-        "name": "East Jakarta (Cakung)",
-        "kecamatan": "Cakung",
-        "population": 381_000,
-        "area_km2": 42.47,
-        "flood_vulnerability": "MEDIUM",
-        "centroid": [106.9476, -6.2041],
-        "bbox": [106.91, -6.24, 106.99, -6.17]
-    },
-    {
-        "name": "South Jakarta (Mampang Prapatan)",
-        "kecamatan": "Mampang Prapatan",
-        "population": 142_000,
-        "area_km2": 7.74,
-        "flood_vulnerability": "LOW",
-        "centroid": [106.8207, -6.2417],
-        "bbox": [106.80, -6.26, 106.85, -6.22]
-    },
-]
-
 
 class VectorGenerator:
     """Generates GIS vector layers from satellite flood analysis."""
@@ -163,8 +69,8 @@ class VectorGenerator:
         if flood_mask is not None and flood_mask.any():
             features = self._vectorize_flood_mask(flood_mask, bbox, source, confidence, date_detected)
         else:
-            # Generate simulation data for Jakarta
-            features = self._simulate_jakarta_flood_extent(bbox, date_detected)
+            # Generate simulation data for the requested location
+            features = self._simulate_flood_extent(bbox, date_detected)
 
         geojson = {
             "type": "FeatureCollection",
@@ -374,7 +280,11 @@ class VectorGenerator:
         job_id: str
     ) -> Dict[str, Any]:
         """
-        Calculate flood statistics per Jakarta district.
+        Calculate flood statistics per district for the given bbox.
+
+        Divides the analysis bbox into a 3×3 grid of sub-regions (districts).
+        This ensures statistics are always computed for the actual requested
+        location rather than hardcoded Jakarta districts.
 
         Returns: GeoJSON with district polygons + statistics
         """
@@ -385,8 +295,10 @@ class VectorGenerator:
                        if f.get("geometry")]
         combined_flood = unary_union(flood_polys) if flood_polys else None
 
+        districts = self._build_districts_from_bbox(bbox)
+
         features = []
-        for district in JAKARTA_DISTRICTS:
+        for district in districts:
             d_bbox = district["bbox"]
             district_poly = box(d_bbox[0], d_bbox[1], d_bbox[2], d_bbox[3])
 
@@ -414,7 +326,7 @@ class VectorGenerator:
                 "geometry": mapping(district_poly),
                 "properties": {
                     "district_name": district["name"],
-                    "kecamatan": district["kecamatan"],
+                    "kecamatan": district["name"],
                     "population": district["population"],
                     "district_area_km2": district["area_km2"],
                     "flood_area_km2": round(flood_area_km2, 3),
@@ -499,75 +411,81 @@ class VectorGenerator:
             return features
         except Exception as e:
             print(f"Rasterio vectorization failed ({e}), using simulation")
-            return self._simulate_jakarta_flood_extent(bbox, date_detected)
+            return self._simulate_flood_extent(bbox, date_detected)
 
-    def _simulate_jakarta_flood_extent(
+    def _simulate_flood_extent(
         self,
         bbox: Tuple,
         date_detected: str
     ) -> List[Dict]:
         """
-        Generate realistic simulated flood extent for Jakarta January 2025.
+        Generate simulated flood extent polygons positioned within the given bbox.
 
-        Based on known flood patterns: Ciliwung River basin, North Jakarta coastal,
-        Cengkareng/Kalideres in West Jakarta.
+        Polygons are defined as fractions of the bbox extent, so they always fall
+        within the requested area regardless of geographic location.
         """
-        # Known flood polygons for Jakarta Jan 2025 (realistic coordinates)
+        min_lon, min_lat, max_lon, max_lat = bbox
+        dlon = max_lon - min_lon
+        dlat = max_lat - min_lat
+
+        def pt(lf: float, bf: float):
+            """Return [lon, lat] as fractions of bbox dimensions."""
+            return [min_lon + dlon * lf, min_lat + dlat * bf]
+
+        # Five flood polygons covering different parts of the bbox.
+        # Positioned toward the north (higher lat fraction) to simulate
+        # typical coastal/low-lying flood patterns.
         flood_polygons_data = [
-            # North Jakarta - Penjaringan (coastal flooding, tidal + river)
+            # Northern coastal / tidal flood zone
             {
                 "coords": [
-                    [106.715, -6.155], [106.735, -6.148], [106.758, -6.145],
-                    [106.775, -6.150], [106.778, -6.162], [106.762, -6.172],
-                    [106.738, -6.175], [106.718, -6.168], [106.715, -6.155]
+                    pt(0.05, 0.75), pt(0.30, 0.77), pt(0.55, 0.79),
+                    pt(0.75, 0.76), pt(0.78, 0.84), pt(0.62, 0.87),
+                    pt(0.38, 0.89), pt(0.18, 0.85), pt(0.05, 0.79),
+                    pt(0.05, 0.75),
                 ],
                 "confidence": "HIGH",
                 "flood_type": "coastal_tidal",
-                "area_estimate_km2": 3.2
             },
-            # North Jakarta - Tanjung Priok / Koja
+            # North-east river overflow zone
             {
                 "coords": [
-                    [106.850, -6.130], [106.875, -6.122], [106.900, -6.125],
-                    [106.910, -6.138], [106.895, -6.150], [106.870, -6.152],
-                    [106.848, -6.145], [106.850, -6.130]
+                    pt(0.65, 0.63), pt(0.80, 0.61), pt(0.92, 0.64),
+                    pt(0.93, 0.72), pt(0.84, 0.76), pt(0.68, 0.74),
+                    pt(0.63, 0.68), pt(0.65, 0.63),
                 ],
                 "confidence": "HIGH",
                 "flood_type": "river_overflow",
-                "area_estimate_km2": 2.8
             },
-            # West Jakarta - Cengkareng (river Angke overflow)
+            # Western river overflow zone
             {
                 "coords": [
-                    [106.718, -6.168], [106.738, -6.165], [106.752, -6.170],
-                    [106.755, -6.185], [106.742, -6.195], [106.720, -6.192],
-                    [106.712, -6.182], [106.718, -6.168]
+                    pt(0.05, 0.61), pt(0.25, 0.59), pt(0.38, 0.63),
+                    pt(0.40, 0.72), pt(0.28, 0.76), pt(0.07, 0.73),
+                    pt(0.02, 0.66), pt(0.05, 0.61),
                 ],
                 "confidence": "MEDIUM",
                 "flood_type": "river_overflow",
-                "area_estimate_km2": 1.9
             },
-            # East Jakarta - Jatinegara / Kampung Melayu (Ciliwung overflow)
+            # Central-east river overflow zone
             {
                 "coords": [
-                    [106.862, -6.215], [106.878, -6.208], [106.892, -6.212],
-                    [106.895, -6.228], [106.880, -6.238], [106.862, -6.232],
-                    [106.855, -6.222], [106.862, -6.215]
+                    pt(0.55, 0.38), pt(0.68, 0.35), pt(0.78, 0.39),
+                    pt(0.80, 0.49), pt(0.70, 0.56), pt(0.55, 0.52),
+                    pt(0.50, 0.43), pt(0.55, 0.38),
                 ],
                 "confidence": "HIGH",
                 "flood_type": "river_overflow",
-                "area_estimate_km2": 1.5
             },
-            # Central Jakarta - Kemayoran (localized urban flooding)
+            # Central urban pluvial flooding
             {
                 "coords": [
-                    [106.845, -6.168], [106.858, -6.162], [106.868, -6.165],
-                    [106.870, -6.178], [106.856, -6.185], [106.843, -6.180],
-                    [106.845, -6.168]
+                    pt(0.40, 0.41), pt(0.50, 0.38), pt(0.57, 0.42),
+                    pt(0.58, 0.51), pt(0.48, 0.56), pt(0.38, 0.52),
+                    pt(0.40, 0.41),
                 ],
                 "confidence": "MEDIUM",
                 "flood_type": "urban_pluvial",
-                "area_estimate_km2": 0.8
             },
         ]
 
@@ -575,7 +493,6 @@ class VectorGenerator:
         for poly_data in flood_polygons_data:
             poly = Polygon(poly_data["coords"])
             area_km2 = self._calc_area_km2_from_geom(poly)
-
             features.append({
                 "type": "Feature",
                 "geometry": mapping(poly),
@@ -586,7 +503,7 @@ class VectorGenerator:
                     "area_ha": round(area_km2 * 100, 1),
                     "source": "Sentinel-1 SAR + Sentinel-2 Optical (simulated)",
                     "date_detected": date_detected,
-                    "note": "Simulation based on historical Jan 2025 flood patterns"
+                    "note": "Simulation based on flood patterns for analysis area"
                 }
             })
 
@@ -598,48 +515,55 @@ class VectorGenerator:
         risk_map: Optional[np.ndarray],
         flood_extent_geojson: Optional[Dict]
     ) -> List[Dict]:
-        """Generate risk zone polygons for Jakarta based on multi-factor analysis."""
+        """
+        Generate risk zone polygons covering the given bbox.
 
-        # HIGH RISK zones - currently flooded + historically vulnerable
+        Zones are defined as fractions of the bbox so they are always positioned
+        within the requested analysis area regardless of geographic location.
+        HIGH risk: northern/coastal section + river corridor.
+        MEDIUM risk: western and eastern mid-sections.
+        LOW risk: southern/elevated section.
+        """
+        min_lon, min_lat, max_lon, max_lat = bbox
+        dlon = max_lon - min_lon
+        dlat = max_lat - min_lat
+
+        def pt(lf: float, bf: float):
+            return [min_lon + dlon * lf, min_lat + dlat * bf]
+
+        # HIGH RISK zones — northern coastal + central river corridor
         high_risk_polygons = [
-            # North Jakarta coast - highest risk
             Polygon([
-                [106.700, -6.180], [106.780, -6.172], [106.835, -6.155],
-                [106.920, -6.145], [106.930, -6.165], [106.920, -6.180],
-                [106.835, -6.185], [106.780, -6.195], [106.700, -6.198],
-                [106.700, -6.180]
+                pt(0.00, 0.68), pt(0.50, 0.67), pt(0.85, 0.61),
+                pt(1.00, 0.63), pt(1.00, 0.97), pt(0.50, 0.97),
+                pt(0.00, 0.97), pt(0.00, 0.68),
             ]),
-            # Ciliwung River corridor
             Polygon([
-                [106.845, -6.190], [106.870, -6.175], [106.895, -6.195],
-                [106.900, -6.240], [106.885, -6.255], [106.858, -6.248],
-                [106.840, -6.225], [106.845, -6.190]
+                pt(0.42, 0.45), pt(0.57, 0.42), pt(0.72, 0.47),
+                pt(0.74, 0.64), pt(0.60, 0.70), pt(0.43, 0.66),
+                pt(0.38, 0.55), pt(0.42, 0.45),
             ]),
         ]
 
-        # MEDIUM RISK zones - low elevation, near drainage, moderate vulnerability
+        # MEDIUM RISK zones — low-elevation mid-sections
         medium_risk_polygons = [
-            # West Jakarta - Angke basin
             Polygon([
-                [106.680, -6.155], [106.760, -6.150], [106.770, -6.195],
-                [106.760, -6.215], [106.730, -6.220], [106.700, -6.210],
-                [106.685, -6.190], [106.680, -6.155]
+                pt(0.00, 0.36), pt(0.42, 0.34), pt(0.56, 0.66),
+                pt(0.42, 0.67), pt(0.00, 0.68), pt(0.00, 0.36),
             ]),
-            # East Jakarta - Bukit Duri / Cawang area
             Polygon([
-                [106.880, -6.225], [106.930, -6.210], [106.980, -6.205],
-                [106.990, -6.235], [106.975, -6.260], [106.940, -6.265],
-                [106.900, -6.258], [106.878, -6.240], [106.880, -6.225]
+                pt(0.57, 0.28), pt(0.90, 0.26), pt(1.00, 0.34),
+                pt(1.00, 0.63), pt(0.85, 0.61), pt(0.72, 0.47),
+                pt(0.57, 0.42), pt(0.57, 0.28),
             ]),
         ]
 
-        # LOW RISK zones - higher elevation (South Jakarta hills)
+        # LOW RISK zones — southern/higher-elevation section
         low_risk_polygons = [
-            # South Jakarta - Kebayoran Baru, Setiabudi
             Polygon([
-                [106.780, -6.220], [106.850, -6.210], [106.870, -6.225],
-                [106.875, -6.270], [106.850, -6.285], [106.800, -6.290],
-                [106.775, -6.270], [106.780, -6.220]
+                pt(0.00, 0.03), pt(0.57, 0.03), pt(0.90, 0.07),
+                pt(0.90, 0.26), pt(0.57, 0.28), pt(0.42, 0.34),
+                pt(0.00, 0.36), pt(0.00, 0.03),
             ]),
         ]
 
@@ -703,6 +627,66 @@ class VectorGenerator:
             })
 
         return features
+
+    def _build_districts_from_bbox(
+        self,
+        bbox: Tuple[float, float, float, float]
+    ) -> List[Dict]:
+        """
+        Divide bbox into a 3×3 grid of nine sub-regions used as proxy districts.
+
+        Row 0 (bottom / south) → LOW vulnerability.
+        Row 1 (middle)         → MEDIUM vulnerability.
+        Row 2 (top / north)    → HIGH vulnerability (coastal/low-elevation).
+        """
+        min_lon, min_lat, max_lon, max_lat = bbox
+        dlon = (max_lon - min_lon) / 3
+        dlat = (max_lat - min_lat) / 3
+
+        # (col, row) → direction label; row 0 = south, row 2 = north
+        direction_names = {
+            (0, 0): "Southwest", (1, 0): "South",    (2, 0): "Southeast",
+            (0, 1): "West",      (1, 1): "Central",  (2, 1): "East",
+            (0, 2): "Northwest", (1, 2): "North",    (2, 2): "Northeast",
+        }
+        vulnerability_map = {
+            0: "LOW",    # southern row
+            1: "MEDIUM", # middle row
+            2: "HIGH",   # northern row
+        }
+        # Rough per-km² population density (generic estimate)
+        density_map = {
+            "HIGH": 8500,
+            "MEDIUM": 6000,
+            "LOW": 3500,
+        }
+
+        districts = []
+        for row in range(3):
+            for col in range(3):
+                sub_min_lon = min_lon + col * dlon
+                sub_max_lon = sub_min_lon + dlon
+                sub_min_lat = min_lat + row * dlat
+                sub_max_lat = sub_min_lat + dlat
+
+                centroid_lon = (sub_min_lon + sub_max_lon) / 2
+                centroid_lat = (sub_min_lat + sub_max_lat) / 2
+
+                # Approximate area: degrees × 111 km/° (lat) × 110 km/° (lon at mid-lat)
+                area_km2 = dlon * 111.0 * dlat * 111.0
+                vuln = vulnerability_map[row]
+                population = int(area_km2 * density_map[vuln])
+
+                districts.append({
+                    "name": direction_names[(col, row)],
+                    "population": population,
+                    "area_km2": round(area_km2, 2),
+                    "flood_vulnerability": vuln,
+                    "centroid": [centroid_lon, centroid_lat],
+                    "bbox": [sub_min_lon, sub_min_lat, sub_max_lon, sub_max_lat],
+                })
+
+        return districts
 
     def _estimate_affected_infrastructure(
         self,

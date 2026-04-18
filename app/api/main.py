@@ -160,18 +160,20 @@ async def process_flood_request(
             parsed = llm_handler._simple_parse(prompt)
 
         location = override_location or parsed.get("location_name") or parsed.get("location", "unknown")
-        bbox = parsed.get("bbox") or None
         date_start = override_date_start or parsed.get("start_date") or parsed.get("date_start", "last 7 days")
         date_end = override_date_end or parsed.get("end_date") or parsed.get("date_end", "today")
 
         jobs[job_id]["parsed"] = parsed
 
-        # Step 2: Geocode if bbox not in parsed result
+        # Step 2: Geocode location (always use Nominatim for reliable coordinates;
+        # the LLM-provided bbox can be inaccurate/hallucinated for non-Jakarta locations)
         jobs[job_id]["status"] = "geocoding"
         jobs[job_id]["progress"] = 20
 
+        bbox = await geocode_location(location)
         if not bbox:
-            bbox = await geocode_location(location)
+            # Fall back to LLM-provided bbox only if geocoding fails
+            bbox = parsed.get("bbox") or None
         if not bbox:
             bbox = (106.5, -6.5, 107.0, -6.0)
             jobs[job_id]["warning"] = "Geocoding failed, using default location"

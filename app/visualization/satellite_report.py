@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from ..utils.config import settings
+from ..utils.geocode import calculate_bbox_area_km2
 
 
 class SatelliteFloodReport:
@@ -73,8 +74,9 @@ class SatelliteFloodReport:
              if f["properties"].get("buffer_distance_m") == 2000), {}
         )
 
-        # Severity
-        flood_pct = (flood_area_km2 / 662.0) * 100
+        # Severity — compute relative to the actual analysis area, not hardcoded Jakarta
+        analysis_area_km2 = calculate_bbox_area_km2(bbox) if bbox else 662.0
+        flood_pct = (flood_area_km2 / analysis_area_km2 * 100) if analysis_area_km2 > 0 else 0
         if flood_pct > 8:
             severity = "SEVERE"
             sev_color = "#DC143C"
