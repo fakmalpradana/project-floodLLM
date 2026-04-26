@@ -168,7 +168,13 @@ class SentinelDownloader:
         date_end: datetime,
         max_images: int
     ) -> List[Dict[str, Any]]:
-        """Synchronous worker: search Planetary Computer and read COG for bbox."""
+        """Synchronous worker: search Planetary Computer and read COG for bbox at 100m resolution."""
+        import os
+        os.environ.setdefault('GDAL_HTTP_MERGE_CONSECUTIVE_RANGES', 'YES')
+        os.environ.setdefault('GDAL_HTTP_MULTIPLEX', 'YES')
+        os.environ.setdefault('GDAL_HTTP_VERSION', '2')
+        os.environ.setdefault('CPL_VSIL_CURL_CACHE_SIZE', '200000000')
+
         from pystac_client import Client
         import planetary_computer
         import rasterio
@@ -207,7 +213,22 @@ class SentinelDownloader:
                     if col_end <= col_off or row_end <= row_off:
                         continue
                     window_clamped = rw.Window(col_off, row_off, col_end - col_off, row_end - row_off)
-                    data = src.read(1, window=window_clamped).astype(np.float32)
+
+                    # Downsample to ~100m resolution to limit HTTP range requests.
+                    # At 10m native res, a 60km×65km bbox = 6000×6500px = 600+ HTTP requests.
+                    # At 100m (GDAL overview) = 600×650px = 6 HTTP requests → ~100x faster.
+                    target = 600
+                    h_px = row_end - row_off
+                    w_px = col_end - col_off
+                    scale = max(1, max(h_px, w_px) / target)
+                    out_h = max(100, int(h_px / scale))
+                    out_w = max(100, int(w_px / scale))
+
+                    data = src.read(
+                        1, window=window_clamped,
+                        out_shape=(out_h, out_w),
+                        resampling=rasterio.enums.Resampling.average,
+                    ).astype(np.float32)
                     out_transform = src.window_transform(window_clamped)
                     data_db = 10 * np.log10(np.where(data > 0, data, 1e-10)).astype(np.float32)
 
@@ -217,8 +238,8 @@ class SentinelDownloader:
                         driver='GTiff', dtype='float32',
                         count=1, crs=src.crs,
                         transform=out_transform,
-                        width=col_end - col_off,
-                        height=row_end - row_off,
+                        width=out_w,
+                        height=out_h,
                     ) as dst:
                         dst.write(data_db, 1)
 
@@ -488,10 +509,15 @@ class SentinelDownloader:
         out_shape: Optional[tuple] = None
     ) -> Optional[tuple]:
         """
-        Read a window of a Cloud-Optimized GeoTIFF matching the bbox.
+        Read a window of a COG matching bbox, downsampled to ≤600px on longest side.
         Returns (data_float32, transform, crs) or None on failure.
         """
         try:
+            import os
+            os.environ.setdefault('GDAL_HTTP_MERGE_CONSECUTIVE_RANGES', 'YES')
+            os.environ.setdefault('GDAL_HTTP_MULTIPLEX', 'YES')
+            os.environ.setdefault('GDAL_HTTP_VERSION', '2')
+
             import rasterio
             from rasterio.warp import transform_bounds
             import rasterio.windows as rw
@@ -509,13 +535,18 @@ class SentinelDownloader:
                 window_clamped = rw.Window(col_off, row_off, col_end - col_off, row_end - row_off)
 
                 if out_shape is not None:
-                    data = src.read(
-                        1, window=window_clamped,
-                        out_shape=out_shape,
-                        resampling=rasterio.enums.Resampling.bilinear,
-                    ).astype(np.float32)
+                    target_shape = out_shape
                 else:
-                    data = src.read(1, window=window_clamped).astype(np.float32)
+                    h_px = row_end - row_off
+                    w_px = col_end - col_off
+                    scale = max(1, max(h_px, w_px) / 600)
+                    target_shape = (max(100, int(h_px / scale)), max(100, int(w_px / scale)))
+
+                data = src.read(
+                    1, window=window_clamped,
+                    out_shape=target_shape,
+                    resampling=rasterio.enums.Resampling.average,
+                ).astype(np.float32)
 
                 out_transform = src.window_transform(window_clamped)
                 return data, out_transform, src.crs
