@@ -130,8 +130,11 @@ class FloodRiskModel:
 
         # Adjust based on current flood extent (if available)
         if flood_extent is not None:
-            # Areas currently flooded get highest risk
-            risk_map = np.maximum(risk_map, flood_extent.astype(float) * 0.9)
+            fe = flood_extent.astype(float)
+            if fe.shape != risk_map.shape:
+                from scipy.ndimage import zoom
+                fe = zoom(fe, (risk_map.shape[0] / fe.shape[0], risk_map.shape[1] / fe.shape[1]), order=0)
+            risk_map = np.maximum(risk_map, fe * 0.9)
 
         # Calculate statistics
         stats = {

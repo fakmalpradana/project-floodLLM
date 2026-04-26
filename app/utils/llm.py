@@ -100,7 +100,7 @@ class LLMPromptHandler:
         """Initialize LLM handler."""
         if settings.google_api_key:
             genai.configure(api_key=settings.google_api_key)
-            self.model = genai.GenerativeModel(model_name)
+            self.model = genai.GenerativeModel(model_name, system_instruction=SYSTEM_PROMPT)
         else:
             self.model = None
 
@@ -111,7 +111,6 @@ class LLMPromptHandler:
 
         messages = get_parsing_messages(user_prompt)
         try:
-            # Using the official prompt structure from system prompt
             response = self.model.generate_content(messages[1]["content"])
             raw = response.text.strip()
             
