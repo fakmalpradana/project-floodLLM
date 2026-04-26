@@ -24,12 +24,31 @@ class SentinelDownloader:
         self.data_dir = settings.data_dir / "sentinel"
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        if EARTHENGINE_AVAILABLE and settings.google_api_key:
+        if EARTHENGINE_AVAILABLE:
             try:
-                ee.Initialize()
+                # Try to initialize with Service Account if credentials provided
+                if settings.google_application_credentials and os.path.exists(settings.google_application_credentials):
+                    print(f"Initializing Earth Engine with Service Account: {settings.gcp_service_account_email}")
+                    credentials = ee.ServiceAccountCredentials(
+                        settings.gcp_service_account_email,
+                        settings.google_application_credentials
+                    )
+                    ee.Initialize(credentials)
+                else:
+                    # Fallback to default application credentials (standard for Cloud Run/App Engine)
+                    print("Initializing Earth Engine with default credentials...")
+                    ee.Initialize()
+                
                 self.ee_initialized = True
             except Exception as e:
-                print(f"Earth Engine init failed: {e}")
+                err = str(e)
+                if "not registered" in err.lower() or "project" in err.lower():
+                    print(
+                        f"[GEE] Earth Engine init failed — project not registered. "
+                        f"Register at https://code.earthengine.google.com/app/projects : {err}"
+                    )
+                else:
+                    print(f"[GEE] Earth Engine init failed: {err}")
                 self.ee_initialized = False
         else:
             self.ee_initialized = False
@@ -44,22 +63,28 @@ class SentinelDownloader:
         """
         Download Sentinel-1 GRD products for flood detection.
 
-        Args:
-            bbox: (min_lon, min_lat, max_lon, max_lat)
-            date_start: Start date (YYYY-MM-DD or relative)
-            date_end: End date
-            max_images: Maximum number of images to download
-
-        Returns: List of downloaded file info
+        Priority: Google Earth Engine → Copernicus CDSE → empty list (simulation fallback).
+        Returns empty list when no real data is available; the pipeline then uses
+        simulated SAR data via VectorGenerator.
         """
-        # Parse dates
-        date_start, date_end = self._parse_dates(date_start, date_end)
+        date_start_dt, date_end_dt = self._parse_dates(date_start, date_end)
 
         if self.ee_initialized:
-            return await self._download_sentinel1_ee(bbox, date_start, date_end, max_images)
+            result = await self._download_sentinel1_ee(bbox, date_start_dt, date_end_dt, max_images)
+            if result:
+                return result
+            print("[S1] GEE returned no images — trying Copernicus fallback")
+
+        if settings.copernicus_username and settings.copernicus_password:
+            print("[S1] Trying Copernicus CDSE download...")
+            result = await self._download_sentinel1_copernicus(bbox, date_start_dt, date_end_dt, max_images)
+            if result:
+                return result
+            print("[S1] Copernicus download failed — entering simulation mode")
         else:
-            # Fallback: use Copernicus API
-            return await self._download_sentinel1_copernicus(bbox, date_start, date_end, max_images)
+            print("[S1] No satellite API available (GEE not registered, no Copernicus creds) — simulation mode")
+
+        return []
 
     async def _download_sentinel1_ee(
         self,
@@ -138,18 +163,18 @@ class SentinelDownloader:
         downloaded = []
 
         try:
-            from sentinelsat import SentinelAPI, geojson_to_wkt
+            from sentinelsat import SentinelAPI, read_geojson, geojson_to_wkt
             from shapely.geometry import box
 
+            # CDSE (Copernicus Data Space Ecosystem) API
             api = SentinelAPI(
                 settings.copernicus_username,
                 settings.copernicus_password,
-                'https://apihub.copernicus.eu/apihub'
+                'https://catalogue.dataspace.copernicus.eu/odata/v1'
             )
 
             # Define search area
-            geometry = box(*bbox)
-            wkt = geojson_to_wkt(geometry)
+            wkt = f"POLYGON(({bbox[0]} {bbox[1]}, {bbox[2]} {bbox[1]}, {bbox[2]} {bbox[3]}, {bbox[0]} {bbox[3]}, {bbox[0]} {bbox[1]}))"
 
             # Search for products
             products = api.query(
@@ -170,9 +195,18 @@ class SentinelDownloader:
                 })
 
         except ImportError:
-            print("sentinelsat not installed. Using Earth Engine fallback.")
+            print("[S1] sentinelsat not installed — cannot use Copernicus API")
         except Exception as e:
-            print(f"Copernicus API download error: {e}")
+            err = str(e)
+            if "403" in err or "Forbidden" in err:
+                print(
+                    "[S1] Copernicus CDSE 403 Forbidden — action required: "
+                    "log in at https://dataspace.copernicus.eu/ and accept the new Terms & Conditions"
+                )
+            elif "401" in err or "Unauthorized" in err:
+                print("[S1] Copernicus CDSE 401 Unauthorized — check username/password in .env")
+            else:
+                print(f"[S1] Copernicus API error: {err}")
 
         return downloaded
 
@@ -199,7 +233,7 @@ class SentinelDownloader:
         date_start, date_end = self._parse_dates(date_start, date_end)
 
         if not self.ee_initialized:
-            print("Earth Engine not available. Sentinel-2 download skipped.")
+            print("[S2] Earth Engine not available — Sentinel-2 skipped (optical validation will use simulation)")
             return []
 
         downloaded = []

@@ -51,7 +51,8 @@ sar_processor = SARProcessor()
 optical_processor = OpticalProcessor()
 risk_model = FloodRiskModel()
 change_detector = ChangeDetector()
-vector_generator = VectorGenerator()
+# VectorGenerator is instantiated per-job (inside process_flood_request) so that
+# job_id is available for seeding simulation and for per-job directory isolation.
 vector_map = VectorFloodMap()
 satellite_reporter = SatelliteFloodReport()
 
@@ -140,6 +141,10 @@ async def process_flood_request(
 ):
     """Process flood monitoring request."""
     try:
+        # Per-job VectorGenerator — seeded with job_id for unique simulation patterns
+        # and writing outputs to an isolated job directory.
+        vector_generator = VectorGenerator(job_id=job_id)
+
         jobs[job_id]["progress"] = 10
         jobs[job_id]["status"] = "parsing_prompt"
 

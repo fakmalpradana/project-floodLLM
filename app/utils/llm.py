@@ -96,7 +96,7 @@ def _days_in_month(year: int, month: int) -> int:
 class LLMPromptHandler:
     """Handle LLM-based prompt parsing and report generation."""
 
-    def __init__(self, model_name: str = "gemini-1.5-flash"):
+    def __init__(self, model_name: str = "gemini-2.0-flash"):
         """Initialize LLM handler."""
         if settings.google_api_key:
             genai.configure(api_key=settings.google_api_key)
@@ -111,15 +111,15 @@ class LLMPromptHandler:
 
         messages = get_parsing_messages(user_prompt)
         try:
-            parse_model = genai.GenerativeModel(
-                "gemini-1.5-flash",
-                system_instruction=messages[0]["content"]
-            )
-            response = parse_model.generate_content(messages[1]["content"])
+            # Using the official prompt structure from system prompt
+            response = self.model.generate_content(messages[1]["content"])
             raw = response.text.strip()
-            fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
-            if fenced:
-                raw = fenced.group(1)
+            
+            # Extract JSON from potential markdown fences
+            json_match = re.search(r"(\{.*?\})", raw, re.DOTALL)
+            if json_match:
+                raw = json_match.group(1)
+            
             parsed = json.loads(raw)
             parsed["original_prompt"] = user_prompt
             return parsed

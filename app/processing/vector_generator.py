@@ -426,62 +426,80 @@ class VectorGenerator:
     ) -> List[Dict]:
         """
         Generate randomized simulated flood extent polygons within the given bbox.
+
+        Seeded by (job_id + bbox_center) so each location+job produces a unique
+        but reproducible pattern.  Polygon size is kept to 0.5-1.8% of bbox
+        dimensions so the total flood area stays ~0.5-2% of AOI — consistent
+        with real urban flood events (Jakarta 2020: ~6 km² out of 645 km²).
         """
         import random
         min_lon, min_lat, max_lon, max_lat = bbox
         dlon = max_lon - min_lon
         dlat = max_lat - min_lat
 
-        # Use job_id as seed if possible for reproducibility within a job but variety between jobs
+        # Combine job_id and bbox center for a location-specific seed.
+        # This ensures Jakarta and Semarang always produce different shapes
+        # AND the same city/job always produces the same shape (reproducible).
+        center_hash = int(abs(min_lon * 1000 + max_lat * 1000)) % 99999
+        job_hash = 0
         if self.job_id:
             try:
-                # Convert first 8 chars of UUID to int
-                seed = int(self.job_id.split('-')[0], 16)
-                random.seed(seed)
+                job_hash = int(self.job_id.replace('-', '')[:8], 16) % 99999
             except Exception:
                 pass
+        random.seed(center_hash + job_hash)
 
         def pt(lf: float, bf: float):
-            """Return [lon, lat] with random jitter."""
-            jitter_lon = (random.random() - 0.5) * 0.05
-            jitter_lat = (random.random() - 0.5) * 0.05
-            return [min_lon + dlon * (lf + jitter_lon), min_lat + dlat * (bf + jitter_lat)]
+            """Return [lon, lat] with small random jitter (≤0.5% of bbox)."""
+            jitter_lon = (random.random() - 0.5) * 0.01
+            jitter_lat = (random.random() - 0.5) * 0.01
+            lf_j = max(0.01, min(0.99, lf + jitter_lon))
+            bf_j = max(0.01, min(0.99, bf + jitter_lat))
+            return [min_lon + dlon * lf_j, min_lat + dlat * bf_j]
 
-        # Randomized number of polygons
-        num_polys = random.randint(3, 7)
+        num_polys = random.randint(4, 6)
+        flood_types = ["river_overflow", "urban_pluvial", "coastal_tidal", "river_overflow"]
         features = []
-        
-        for i in range(num_polys):
-            # Random center for each polygon
-            cf_lon = random.uniform(0.1, 0.9)
-            cf_lat = random.uniform(0.1, 0.9)
-            size = random.uniform(0.02, 0.08)
-            
-            coords = [
-                pt(cf_lon - size, cf_lat - size),
-                pt(cf_lon + size, cf_lat - size),
-                pt(cf_lon + size, cf_lat + size),
-                pt(cf_lon - size, cf_lat + size),
-                pt(cf_lon - size, cf_lat - size)
-            ]
-            
-            poly = Polygon(coords)
-            area_km2 = self._calc_area_km2_from_geom(poly)
-            features.append({
-                "type": "Feature",
-                "geometry": mapping(poly),
-                "properties": {
-                    "flood_type": random.choice(["river_overflow", "urban_pluvial", "coastal_tidal"]),
-                    "confidence": random.choice(["HIGH", "MEDIUM"]),
-                    "area_km2": round(area_km2, 3),
-                    "area_ha": round(area_km2 * 100, 1),
-                    "source": "Sentinel-1 SAR + Sentinel-2 Optical (simulated fallback)",
-                    "date_detected": date_detected,
-                    "note": "Simulation randomized for analysis area"
-                }
-            })
 
-        # Reset seed
+        for i in range(num_polys):
+            cf_lon = random.uniform(0.08, 0.92)
+            cf_lat = random.uniform(0.08, 0.92)
+            # size is fraction of bbox: keep to 0.5-1.8% of bbox width/height
+            # so each polygon ≈ (2×0.018)² = 0.0013 bbox-fraction² → ~5 km² at 4000 km²
+            size = random.uniform(0.005, 0.018)
+
+            # Build a roughly convex polygon with 5-7 vertices for variety
+            n_verts = random.randint(5, 7)
+            import math
+            coords = []
+            for v in range(n_verts):
+                angle = 2 * math.pi * v / n_verts
+                r = size * random.uniform(0.7, 1.3)
+                coords.append(pt(cf_lon + r * math.cos(angle),
+                                  cf_lat + r * math.sin(angle)))
+            coords.append(coords[0])  # close ring
+
+            try:
+                poly = Polygon(coords)
+                if not poly.is_valid:
+                    poly = poly.convex_hull
+                area_km2 = self._calc_area_km2_from_geom(poly)
+                features.append({
+                    "type": "Feature",
+                    "geometry": mapping(poly),
+                    "properties": {
+                        "flood_type": flood_types[i % len(flood_types)],
+                        "confidence": random.choice(["HIGH", "HIGH", "MEDIUM"]),
+                        "area_km2": round(area_km2, 3),
+                        "area_ha": round(area_km2 * 100, 1),
+                        "source": "Sentinel-1 SAR + Sentinel-2 Optical (simulated)",
+                        "date_detected": date_detected,
+                        "note": "Simulation — real satellite data unavailable"
+                    }
+                })
+            except Exception:
+                continue
+
         random.seed(None)
         return features
 
@@ -495,16 +513,19 @@ class VectorGenerator:
         Generate randomized risk zone polygons covering the given bbox.
         """
         import random
-        if self.job_id:
-            try:
-                seed = int(self.job_id.split('-')[0], 16) + 1 # Different seed from flood
-                random.seed(seed)
-            except Exception:
-                pass
-
         min_lon, min_lat, max_lon, max_lat = bbox
         dlon = max_lon - min_lon
         dlat = max_lat - min_lat
+
+        # Location+job specific seed (offset by 1 from flood seed)
+        center_hash = int(abs(min_lon * 1000 + max_lat * 1000)) % 99999
+        job_hash = 0
+        if self.job_id:
+            try:
+                job_hash = int(self.job_id.replace('-', '')[:8], 16) % 99999
+            except Exception:
+                pass
+        random.seed(center_hash + job_hash + 1)
 
         def pt(lf: float, bf: float):
             return [min_lon + dlon * lf, min_lat + dlat * bf]
