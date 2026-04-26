@@ -99,17 +99,25 @@ async def run_pipeline(params: Dict[str, Any]):
     # STEP 4: SAR Flood Detection
     logger.log(4, "SAR Flood Detection (Otsu + Backscatter Drop)")
     sar_proc = SARProcessor(job_id=job_id)
-    flood_mask = None
+    actual_mask = None
     flood_stats = {}
     if s1_event:
         res = sar_proc.process(s1_event[0]['filepath'], bbox, job_id=job_id)
         if res:
             flood_mask_path = res.get('mask_path')
             flood_stats = res.get('statistics', {})
-            # For simplicity, we'd load the mask array here if needed for next steps
-            # In this mock, we assume success
-            flood_mask = res.get('job_id') # placeholder
-    logger.log(4, "SAR Flood Detection", "completed", f"Area: {flood_stats.get('flood_area_km2', 0)} km2")
+            # Try to load the mask if file exists
+            try:
+                import rasterio
+                with rasterio.open(flood_mask_path) as src:
+                    actual_mask = src.read(1)
+            except Exception:
+                actual_mask = None
+    
+    if actual_mask is not None:
+        logger.log(4, "SAR Flood Detection", "completed", f"Area: {flood_stats.get('flood_area_km2', 0)} km2")
+    else:
+        logger.log(4, "SAR Flood Detection", "failed", "No S1 data found or processing failed. Using simulation.")
 
     # STEP 5: Optical Validation
     logger.log(5, "Optical Validation (NDWI / MNDWI)")
@@ -143,8 +151,8 @@ async def run_pipeline(params: Dict[str, Any]):
     from app.processing.vector_generator import VectorGenerator
     vector_gen = VectorGenerator(job_id=job_id)
     
-    # Generate Flood Vector (will use simulation if mask is None)
-    flood_vec_res = vector_gen.generate_flood_extent_vector(None, bbox, job_id)
+    # Generate Flood Vector (will use actual mask if available)
+    flood_vec_res = vector_gen.generate_flood_extent_vector(actual_mask, bbox, job_id)
     
     # Generate Risk Vector using results from Step 6
     # Note: VectorGenerator expects a risk_map or uses its internal simulation

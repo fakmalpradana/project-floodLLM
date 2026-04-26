@@ -425,95 +425,64 @@ class VectorGenerator:
         date_detected: str
     ) -> List[Dict]:
         """
-        Generate simulated flood extent polygons within the given bbox.
-
-        Each polygon covers ~3-6% of the bbox width/height so total flood area
-        is roughly 1-2% of the AOI — consistent with typical urban flood events
-        (e.g. Jakarta 2020: ~6 km² flooded within 645 km² AOI).
+        Generate randomized simulated flood extent polygons within the given bbox.
         """
+        import random
         min_lon, min_lat, max_lon, max_lat = bbox
         dlon = max_lon - min_lon
         dlat = max_lat - min_lat
 
+        # Use job_id as seed if possible for reproducibility within a job but variety between jobs
+        if self.job_id:
+            try:
+                # Convert first 8 chars of UUID to int
+                seed = int(self.job_id.split('-')[0], 16)
+                random.seed(seed)
+            except Exception:
+                pass
+
         def pt(lf: float, bf: float):
-            """Return [lon, lat] as fractions of bbox dimensions."""
-            return [min_lon + dlon * lf, min_lat + dlat * bf]
+            """Return [lon, lat] with random jitter."""
+            jitter_lon = (random.random() - 0.5) * 0.05
+            jitter_lat = (random.random() - 0.5) * 0.05
+            return [min_lon + dlon * (lf + jitter_lon), min_lat + dlat * (bf + jitter_lat)]
 
-        # Five small flood polygons. Each polygon spans ~2-3% of the bbox in each
-        # direction so the total simulated flood area is ~1-2% of the AOI —
-        # consistent with real urban flood events (e.g. Jakarta 2020: ~6 km²
-        # out of a 645 km² AOI).
-        flood_polygons_data = [
-            # Northern coastal strip
-            {
-                "coords": [
-                    pt(0.10, 0.82), pt(0.13, 0.815), pt(0.16, 0.82),
-                    pt(0.155, 0.848), pt(0.125, 0.852), pt(0.095, 0.842),
-                    pt(0.10, 0.82),
-                ],
-                "confidence": "HIGH",
-                "flood_type": "coastal_tidal",
-            },
-            # North-east river corridor
-            {
-                "coords": [
-                    pt(0.68, 0.74), pt(0.71, 0.735), pt(0.74, 0.742),
-                    pt(0.738, 0.770), pt(0.708, 0.775), pt(0.675, 0.765),
-                    pt(0.68, 0.74),
-                ],
-                "confidence": "HIGH",
-                "flood_type": "river_overflow",
-            },
-            # Western river bank
-            {
-                "coords": [
-                    pt(0.08, 0.64), pt(0.11, 0.635), pt(0.135, 0.643),
-                    pt(0.132, 0.668), pt(0.105, 0.673), pt(0.077, 0.663),
-                    pt(0.08, 0.64),
-                ],
-                "confidence": "MEDIUM",
-                "flood_type": "river_overflow",
-            },
-            # Central-east low-lying area
-            {
-                "coords": [
-                    pt(0.57, 0.56), pt(0.60, 0.555), pt(0.625, 0.562),
-                    pt(0.622, 0.588), pt(0.594, 0.593), pt(0.567, 0.583),
-                    pt(0.57, 0.56),
-                ],
-                "confidence": "HIGH",
-                "flood_type": "river_overflow",
-            },
-            # Central urban pluvial pocket
-            {
-                "coords": [
-                    pt(0.43, 0.58), pt(0.455, 0.576), pt(0.475, 0.582),
-                    pt(0.472, 0.606), pt(0.447, 0.610), pt(0.427, 0.601),
-                    pt(0.43, 0.58),
-                ],
-                "confidence": "MEDIUM",
-                "flood_type": "urban_pluvial",
-            },
-        ]
-
+        # Randomized number of polygons
+        num_polys = random.randint(3, 7)
         features = []
-        for poly_data in flood_polygons_data:
-            poly = Polygon(poly_data["coords"])
+        
+        for i in range(num_polys):
+            # Random center for each polygon
+            cf_lon = random.uniform(0.1, 0.9)
+            cf_lat = random.uniform(0.1, 0.9)
+            size = random.uniform(0.02, 0.08)
+            
+            coords = [
+                pt(cf_lon - size, cf_lat - size),
+                pt(cf_lon + size, cf_lat - size),
+                pt(cf_lon + size, cf_lat + size),
+                pt(cf_lon - size, cf_lat + size),
+                pt(cf_lon - size, cf_lat - size)
+            ]
+            
+            poly = Polygon(coords)
             area_km2 = self._calc_area_km2_from_geom(poly)
             features.append({
                 "type": "Feature",
                 "geometry": mapping(poly),
                 "properties": {
-                    "flood_type": poly_data["flood_type"],
-                    "confidence": poly_data["confidence"],
+                    "flood_type": random.choice(["river_overflow", "urban_pluvial", "coastal_tidal"]),
+                    "confidence": random.choice(["HIGH", "MEDIUM"]),
                     "area_km2": round(area_km2, 3),
                     "area_ha": round(area_km2 * 100, 1),
-                    "source": "Sentinel-1 SAR + Sentinel-2 Optical (simulated)",
+                    "source": "Sentinel-1 SAR + Sentinel-2 Optical (simulated fallback)",
                     "date_detected": date_detected,
-                    "note": "Simulation based on flood patterns for analysis area"
+                    "note": "Simulation randomized for analysis area"
                 }
             })
 
+        # Reset seed
+        random.seed(None)
         return features
 
     def _generate_risk_zone_polygons(
@@ -523,14 +492,16 @@ class VectorGenerator:
         flood_extent_geojson: Optional[Dict]
     ) -> List[Dict]:
         """
-        Generate risk zone polygons covering the given bbox.
-
-        Zones are defined as fractions of the bbox so they are always positioned
-        within the requested analysis area regardless of geographic location.
-        HIGH risk: northern/coastal section + river corridor.
-        MEDIUM risk: western and eastern mid-sections.
-        LOW risk: southern/elevated section.
+        Generate randomized risk zone polygons covering the given bbox.
         """
+        import random
+        if self.job_id:
+            try:
+                seed = int(self.job_id.split('-')[0], 16) + 1 # Different seed from flood
+                random.seed(seed)
+            except Exception:
+                pass
+
         min_lon, min_lat, max_lon, max_lat = bbox
         dlon = max_lon - min_lon
         dlat = max_lat - min_lat
@@ -538,40 +509,27 @@ class VectorGenerator:
         def pt(lf: float, bf: float):
             return [min_lon + dlon * lf, min_lat + dlat * bf]
 
-        # HIGH RISK zones — northern coastal + central river corridor
+        # Randomized High Risk (Northern/Central)
+        h_split = random.uniform(0.5, 0.8)
         high_risk_polygons = [
             Polygon([
-                pt(0.00, 0.68), pt(0.50, 0.67), pt(0.85, 0.61),
-                pt(1.00, 0.63), pt(1.00, 0.97), pt(0.50, 0.97),
-                pt(0.00, 0.97), pt(0.00, 0.68),
-            ]),
-            Polygon([
-                pt(0.42, 0.45), pt(0.57, 0.42), pt(0.72, 0.47),
-                pt(0.74, 0.64), pt(0.60, 0.70), pt(0.43, 0.66),
-                pt(0.38, 0.55), pt(0.42, 0.45),
-            ]),
+                pt(0.00, h_split), pt(1.00, h_split - 0.1), pt(1.00, 1.00), pt(0.00, 1.00), pt(0.00, h_split)
+            ])
         ]
 
-        # MEDIUM RISK zones — low-elevation mid-sections
+        # Randomized Medium Risk
+        m_split = random.uniform(0.2, 0.4)
         medium_risk_polygons = [
             Polygon([
-                pt(0.00, 0.36), pt(0.42, 0.34), pt(0.56, 0.66),
-                pt(0.42, 0.67), pt(0.00, 0.68), pt(0.00, 0.36),
-            ]),
-            Polygon([
-                pt(0.57, 0.28), pt(0.90, 0.26), pt(1.00, 0.34),
-                pt(1.00, 0.63), pt(0.85, 0.61), pt(0.72, 0.47),
-                pt(0.57, 0.42), pt(0.57, 0.28),
-            ]),
+                pt(0.00, m_split), pt(1.00, m_split), pt(1.00, h_split - 0.1), pt(0.00, h_split), pt(0.00, m_split)
+            ])
         ]
 
-        # LOW RISK zones — southern/higher-elevation section
+        # Randomized Low Risk
         low_risk_polygons = [
             Polygon([
-                pt(0.00, 0.03), pt(0.57, 0.03), pt(0.90, 0.07),
-                pt(0.90, 0.26), pt(0.57, 0.28), pt(0.42, 0.34),
-                pt(0.00, 0.36), pt(0.00, 0.03),
-            ]),
+                pt(0.00, 0.00), pt(1.00, 0.00), pt(1.00, m_split), pt(0.00, m_split), pt(0.00, 0.00)
+            ])
         ]
 
         features = []
