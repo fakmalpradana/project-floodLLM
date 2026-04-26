@@ -53,6 +53,9 @@ Output: {"location_name": "Bandung, Indonesia", "start_date": "2021-01-01", "end
 
 Input: 'Today is 2025-04-18.\n\nanalisis banjir di surabaya pada 1 tahun kebelakang'
 Output: {"location_name": "Surabaya, Indonesia", "start_date": "2024-04-18", "end_date": "2025-04-18"}
+
+Input: 'Today is 2026-04-27.\n\nanalyze flood risk in Jakarta in 2020'
+Output: {"location_name": "Jakarta, Indonesia", "start_date": "2020-01-01", "end_date": "2020-12-31"}
 """
 
 
@@ -82,6 +85,8 @@ _STOP_WORDS = {
     'pada', 'selama', 'dalam', 'untuk', 'for', 'during', 'since',
     'minggu', 'bulan', 'hari', 'tahun', 'kemarin', 'lalu', 'kebelakang',
     'yang', 'last', 'ago', 'past', 'the', 'and', 'or', 'a', 'an',
+    # English prepositions that terminate a city name
+    'in', 'at', 'on', 'of', 'from', 'to', 'by', 'near', 'around',
     'analisis', 'analisa', 'analysis', 'risiko', 'risk', 'deteksi',
     'detection', 'banjir', 'flood', 'genangan', 'monitoring', 'assessment',
     'show', 'tampilkan', 'lihat', 'cek', 'check', 'laporan', 'report',
