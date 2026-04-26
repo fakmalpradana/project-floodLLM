@@ -18,6 +18,8 @@ mapclassify==2.8.1
 # Satellite data
 sentinelsat==1.2.1
 earthengine-api==1.4.0
+pystac-client>=0.8.0
+planetary-computer>=1.0.0
 
 # Data processing
 numpy==1.26.4

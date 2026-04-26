@@ -26,7 +26,6 @@ class SentinelDownloader:
 
         if EARTHENGINE_AVAILABLE:
             try:
-                # Try to initialize with Service Account if credentials provided
                 if settings.google_application_credentials and os.path.exists(settings.google_application_credentials):
                     print(f"Initializing Earth Engine with Service Account: {settings.gcp_service_account_email}")
                     credentials = ee.ServiceAccountCredentials(
@@ -35,23 +34,26 @@ class SentinelDownloader:
                     )
                     ee.Initialize(credentials)
                 else:
-                    # Fallback to default application credentials (standard for Cloud Run/App Engine)
                     print("Initializing Earth Engine with default credentials...")
                     ee.Initialize()
-                
+
                 self.ee_initialized = True
             except Exception as e:
                 err = str(e)
                 if "not registered" in err.lower() or "project" in err.lower():
                     print(
                         f"[GEE] Earth Engine init failed — project not registered. "
-                        f"Register at https://code.earthengine.google.com/app/projects : {err}"
+                        f"Register at https://console.cloud.google.com/earth-engine : {err}"
                     )
                 else:
                     print(f"[GEE] Earth Engine init failed: {err}")
                 self.ee_initialized = False
         else:
             self.ee_initialized = False
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Sentinel-1
+    # ─────────────────────────────────────────────────────────────────────────
 
     async def download_sentinel1(
         self,
@@ -63,9 +65,7 @@ class SentinelDownloader:
         """
         Download Sentinel-1 GRD products for flood detection.
 
-        Priority: Google Earth Engine → Copernicus CDSE → empty list (simulation fallback).
-        Returns empty list when no real data is available; the pipeline then uses
-        simulated SAR data via VectorGenerator.
+        Priority: GEE → Planetary Computer STAC → empty list (simulation fallback).
         """
         date_start_dt, date_end_dt = self._parse_dates(date_start, date_end)
 
@@ -73,17 +73,13 @@ class SentinelDownloader:
             result = await self._download_sentinel1_ee(bbox, date_start_dt, date_end_dt, max_images)
             if result:
                 return result
-            print("[S1] GEE returned no images — trying Copernicus fallback")
+            print("[S1] GEE returned no images — trying Planetary Computer fallback")
 
-        if settings.copernicus_username and settings.copernicus_password:
-            print("[S1] Trying Copernicus CDSE download...")
-            result = await self._download_sentinel1_copernicus(bbox, date_start_dt, date_end_dt, max_images)
-            if result:
-                return result
-            print("[S1] Copernicus download failed — entering simulation mode")
-        else:
-            print("[S1] No satellite API available (GEE not registered, no Copernicus creds) — simulation mode")
+        result = await self._download_sentinel1_planetary_computer(bbox, date_start_dt, date_end_dt, max_images)
+        if result:
+            return result
 
+        print("[S1] All sources exhausted — entering simulation mode")
         return []
 
     async def _download_sentinel1_ee(
@@ -97,10 +93,8 @@ class SentinelDownloader:
         downloaded = []
 
         try:
-            # Define area of interest
             aoi = ee.Geometry.Rectangle(bbox)
 
-            # Filter Sentinel-1 GRD collection
             s1_collection = (
                 ee.ImageCollection('COPERNICUS/S1_GRD')
                 .filterBounds(aoi)
@@ -110,19 +104,16 @@ class SentinelDownloader:
                 .select(['VV', 'VH'])
             )
 
-            # Get image list
             image_list = s1_collection.limit(max_images).getInfo()
 
             if not image_list.get('features'):
                 print("No Sentinel-1 images found for area/date")
                 return []
 
-            # Download each image
             for feature in image_list['features']:
                 props = feature['properties']
                 image_id = props['system:id']
 
-                # Create download task
                 url = s1_collection.filter(ee.Filter.eq('system:id', image_id)) \
                     .first().getDownloadURL({
                         'name': f's1_{image_id.replace("/", "_")}',
@@ -130,7 +121,6 @@ class SentinelDownloader:
                         'region': bbox
                     })
 
-                # Download file
                 import httpx
                 async with httpx.AsyncClient() as client:
                     response = await client.get(url, timeout=60.0)
@@ -143,72 +133,107 @@ class SentinelDownloader:
                             'id': image_id,
                             'filepath': str(filepath),
                             'date': props['system:time_start'],
-                            'bbox': bbox
+                            'bbox': bbox,
+                            'source': 'gee'
                         })
-                        print(f"Downloaded: {image_id}")
+                        print(f"[S1] Downloaded via GEE: {image_id}")
 
         except Exception as e:
-            print(f"Sentinel-1 Earth Engine download error: {e}")
+            print(f"[S1] Earth Engine download error: {e}")
 
         return downloaded
 
-    async def _download_sentinel1_copernicus(
+    async def _download_sentinel1_planetary_computer(
         self,
         bbox: tuple,
         date_start: datetime,
         date_end: datetime,
         max_images: int
     ) -> List[Dict[str, Any]]:
-        """Download Sentinel-1 using Copernicus Data Space API."""
+        """Download Sentinel-1 RTC via Microsoft Planetary Computer STAC (no auth required)."""
         downloaded = []
-
         try:
-            from sentinelsat import SentinelAPI, read_geojson, geojson_to_wkt
-            from shapely.geometry import box
+            from pystac_client import Client
+            import planetary_computer
+            import rasterio
+            from rasterio.warp import transform_bounds
+            import rasterio.windows as rw
+            import numpy as np
 
-            # CDSE (Copernicus Data Space Ecosystem) API
-            api = SentinelAPI(
-                settings.copernicus_username,
-                settings.copernicus_password,
-                'https://catalogue.dataspace.copernicus.eu/odata/v1'
+            catalog = Client.open(
+                "https://planetarycomputer.microsoft.com/api/stac/v1",
+                modifier=planetary_computer.sign_inplace,
             )
 
-            # Define search area
-            wkt = f"POLYGON(({bbox[0]} {bbox[1]}, {bbox[2]} {bbox[1]}, {bbox[2]} {bbox[3]}, {bbox[0]} {bbox[3]}, {bbox[0]} {bbox[1]}))"
-
-            # Search for products
-            products = api.query(
-                wkt,
-                producttype='GRD',
-                date=(date_start.strftime('%Y%m%d'), date_end.strftime('%Y%m%d')),
-                limit=max_images
+            search = catalog.search(
+                collections=["sentinel-1-rtc"],
+                bbox=list(bbox),
+                datetime=f"{date_start.strftime('%Y-%m-%d')}/{date_end.strftime('%Y-%m-%d')}",
+                max_items=max_images,
             )
 
-            # Download products
-            for uuid, props in products.items():
-                filepath = api.download(uuid, self.data_dir)
-                downloaded.append({
-                    'id': props['identifier'],
-                    'filepath': str(filepath),
-                    'date': props['beginposition'],
-                    'bbox': bbox
-                })
+            items = list(search.get_items())
+            if not items:
+                print("[S1] Planetary Computer: no Sentinel-1 RTC images found")
+                return []
+
+            for item in items[:max_images]:
+                if 'vv' not in item.assets:
+                    continue
+                vv_url = item.assets['vv'].href
+                try:
+                    with rasterio.open(vv_url) as src:
+                        img_bounds = transform_bounds('EPSG:4326', src.crs, *bbox)
+                        window = rw.from_bounds(*img_bounds, transform=src.transform)
+                        # Clamp to valid image extent
+                        col_off = max(0, int(window.col_off))
+                        row_off = max(0, int(window.row_off))
+                        col_end = min(src.width, int(window.col_off + window.width))
+                        row_end = min(src.height, int(window.row_off + window.height))
+                        if col_end <= col_off or row_end <= row_off:
+                            continue
+                        window_clamped = rw.Window(col_off, row_off, col_end - col_off, row_end - row_off)
+
+                        data = src.read(1, window=window_clamped).astype(np.float32)
+                        out_transform = src.window_transform(window_clamped)
+
+                        # Convert linear gamma0 to dB
+                        data_db = 10 * np.log10(np.where(data > 0, data, 1e-10)).astype(np.float32)
+
+                        filepath = self.data_dir / f"s1_rtc_{item.id}.tiff"
+                        with rasterio.open(
+                            filepath, 'w',
+                            driver='GTiff', dtype='float32',
+                            count=1, crs=src.crs,
+                            transform=out_transform,
+                            width=col_end - col_off,
+                            height=row_end - row_off,
+                        ) as dst:
+                            dst.write(data_db, 1)
+
+                    downloaded.append({
+                        'id': item.id,
+                        'filepath': str(filepath),
+                        'date': item.datetime.isoformat() if item.datetime else date_start.isoformat(),
+                        'bbox': bbox,
+                        'source': 'planetary_computer',
+                    })
+                    print(f"[S1] Downloaded from Planetary Computer: {item.id}")
+
+                except Exception as e:
+                    print(f"[S1] Error downloading {item.id}: {e}")
+                    continue
 
         except ImportError:
-            print("[S1] sentinelsat not installed — cannot use Copernicus API")
+            print("[S1] pystac-client or planetary-computer not installed — skipping Planetary Computer")
         except Exception as e:
-            err = str(e)
-            if "403" in err or "Forbidden" in err:
-                print(
-                    "[S1] Copernicus CDSE 403 Forbidden — action required: "
-                    "log in at https://dataspace.copernicus.eu/ and accept the new Terms & Conditions"
-                )
-            elif "401" in err or "Unauthorized" in err:
-                print("[S1] Copernicus CDSE 401 Unauthorized — check username/password in .env")
-            else:
-                print(f"[S1] Copernicus API error: {err}")
+            print(f"[S1] Planetary Computer error: {e}")
 
         return downloaded
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Sentinel-2
+    # ─────────────────────────────────────────────────────────────────────────
 
     async def download_sentinel2(
         self,
@@ -221,39 +246,49 @@ class SentinelDownloader:
         """
         Download Sentinel-2 L2A products for validation.
 
-        Args:
-            bbox: Bounding box
-            date_start: Start date
-            date_end: End date
-            max_cloud_cover: Maximum cloud cover percentage
-            max_images: Maximum images
-
-        Returns: List of downloaded file info
+        Priority: GEE → Planetary Computer STAC → Element84 STAC → empty list.
         """
-        date_start, date_end = self._parse_dates(date_start, date_end)
+        date_start_dt, date_end_dt = self._parse_dates(date_start, date_end)
 
-        if not self.ee_initialized:
-            print("[S2] Earth Engine not available — Sentinel-2 skipped (optical validation will use simulation)")
-            return []
+        if self.ee_initialized:
+            result = await self._download_sentinel2_ee(bbox, date_start_dt, date_end_dt, max_cloud_cover, max_images)
+            if result:
+                return result
+            print("[S2] GEE returned no images — trying STAC fallback")
 
+        result = await self._download_sentinel2_stac(bbox, date_start_dt, date_end_dt, max_cloud_cover, max_images)
+        if result:
+            return result
+
+        print("[S2] All sources exhausted — optical validation will use simulation")
+        return []
+
+    async def _download_sentinel2_ee(
+        self,
+        bbox: tuple,
+        date_start: datetime,
+        date_end: datetime,
+        max_cloud_cover: float,
+        max_images: int
+    ) -> List[Dict[str, Any]]:
+        """Download Sentinel-2 L2A using Earth Engine."""
         downloaded = []
 
         try:
             aoi = ee.Geometry.Rectangle(bbox)
 
-            # Filter Sentinel-2 collection (Level-2A, surface reflectance)
             s2_collection = (
                 ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
                 .filterBounds(aoi)
                 .filterDate(date_start, date_end)
                 .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', max_cloud_cover))
-                .select(['B2', 'B3', 'B4', 'B8', 'B11'])  # Required bands for NDWI
+                .select(['B2', 'B3', 'B4', 'B8', 'B11'])
             )
 
             image_list = s2_collection.limit(max_images).getInfo()
 
             if not image_list.get('features'):
-                print("No Sentinel-2 images found (may be cloudy)")
+                print("[S2] No Sentinel-2 images found via GEE (may be cloudy)")
                 return []
 
             for feature in image_list['features']:
@@ -261,8 +296,6 @@ class SentinelDownloader:
                 image_id = props['system:id']
 
                 image = s2_collection.filter(ee.Filter.eq('system:id', image_id)).first()
-
-                # Download as GeoTIFF
                 url = image.getDownloadURL({
                     'name': f's2_{image_id.replace("/", "_")}',
                     'scale': 10,
@@ -283,54 +316,226 @@ class SentinelDownloader:
                             'filepath': str(filepath),
                             'date': props['system:time_start'],
                             'cloud_cover': props.get('CLOUDY_PIXEL_PERCENTAGE', 0),
-                            'bbox': bbox
+                            'bbox': bbox,
+                            'source': 'gee'
                         })
 
         except Exception as e:
-            print(f"Sentinel-2 download error: {e}")
+            print(f"[S2] Earth Engine download error: {e}")
 
         return downloaded
+
+    async def _download_sentinel2_stac(
+        self,
+        bbox: tuple,
+        date_start: datetime,
+        date_end: datetime,
+        max_cloud_cover: float,
+        max_images: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Download Sentinel-2 L2A via STAC.
+        Tries Planetary Computer first, then Element84 Earth Search as fallback.
+        Saves a 2-band GeoTIFF (band 1=green, band 2=NIR) for NDWI calculation.
+        """
+        downloaded = []
+
+        # STAC endpoints to try in order
+        stac_sources = [
+            {
+                "name": "Planetary Computer",
+                "url": "https://planetarycomputer.microsoft.com/api/stac/v1",
+                "use_planetary_computer": True,
+                "collection": "sentinel-2-l2a",
+                "green_key": "B03",
+                "nir_key": "B08",
+                "cloud_prop": "eo:cloud_cover",
+            },
+            {
+                "name": "Element84 Earth Search",
+                "url": "https://earth-search.aws.element84.com/v1",
+                "use_planetary_computer": False,
+                "collection": "sentinel-2-l2a",
+                "green_key": "green",
+                "nir_key": "nir",
+                "cloud_prop": "eo:cloud_cover",
+            },
+        ]
+
+        try:
+            from pystac_client import Client
+            import rasterio
+            from rasterio.warp import transform_bounds
+            import rasterio.windows as rw
+            import numpy as np
+
+            for source in stac_sources:
+                if downloaded:
+                    break
+                try:
+                    kwargs = {}
+                    if source["use_planetary_computer"]:
+                        import planetary_computer
+                        kwargs["modifier"] = planetary_computer.sign_inplace
+
+                    catalog = Client.open(source["url"], **kwargs)
+                    search = catalog.search(
+                        collections=[source["collection"]],
+                        bbox=list(bbox),
+                        datetime=f"{date_start.strftime('%Y-%m-%d')}/{date_end.strftime('%Y-%m-%d')}",
+                        query={source["cloud_prop"]: {"lt": max_cloud_cover}},
+                        max_items=max_images,
+                    )
+                    items = list(search.get_items())
+                    if not items:
+                        print(f"[S2] {source['name']}: no images found")
+                        continue
+
+                    for item in items[:max_images]:
+                        # Try configured keys then fallbacks
+                        green_url = self._get_asset_url(item, [source["green_key"], "B03", "green"])
+                        nir_url = self._get_asset_url(item, [source["nir_key"], "B08", "nir"])
+                        if not green_url or not nir_url:
+                            continue
+
+                        try:
+                            green_band = self._read_cog_window(green_url, bbox)
+                            if green_band is None:
+                                continue
+                            data, out_transform, out_crs = green_band
+
+                            nir_raw = self._read_cog_window(nir_url, bbox, out_shape=data.shape)
+                            if nir_raw is None:
+                                continue
+                            nir_data, _, _ = nir_raw
+
+                            filepath = self.data_dir / f"s2_ndwi_{item.id}.tiff"
+                            with rasterio.open(
+                                filepath, 'w',
+                                driver='GTiff', dtype='float32',
+                                count=2, crs=out_crs,
+                                transform=out_transform,
+                                width=data.shape[1], height=data.shape[0],
+                            ) as dst:
+                                dst.write(data, 1)
+                                dst.write(nir_data, 2)
+
+                            downloaded.append({
+                                'id': item.id,
+                                'filepath': str(filepath),
+                                'date': item.datetime.isoformat() if item.datetime else date_start.isoformat(),
+                                'cloud_cover': item.properties.get(source["cloud_prop"], 0),
+                                'bbox': bbox,
+                                'source': source["name"],
+                            })
+                            print(f"[S2] Downloaded from {source['name']}: {item.id}")
+
+                        except Exception as e:
+                            print(f"[S2] Error downloading item {item.id}: {e}")
+                            continue
+
+                except ImportError:
+                    if source["use_planetary_computer"]:
+                        print("[S2] planetary-computer package not installed — skipping Planetary Computer")
+                    continue
+                except Exception as e:
+                    print(f"[S2] {source['name']} error: {e}")
+                    continue
+
+        except ImportError:
+            print("[S2] pystac-client not installed — skipping STAC download")
+        except Exception as e:
+            print(f"[S2] STAC download error: {e}")
+
+        return downloaded
+
+    def _get_asset_url(self, item, keys: list) -> Optional[str]:
+        """Return the first matching asset href from a list of candidate keys."""
+        for key in keys:
+            if key in item.assets:
+                return item.assets[key].href
+        return None
+
+    def _read_cog_window(
+        self,
+        url: str,
+        bbox: tuple,
+        out_shape: Optional[tuple] = None
+    ) -> Optional[tuple]:
+        """
+        Read a window of a Cloud-Optimized GeoTIFF matching the bbox.
+        Returns (data_float32, transform, crs) or None on failure.
+        """
+        try:
+            import rasterio
+            from rasterio.warp import transform_bounds
+            import rasterio.windows as rw
+            import numpy as np
+
+            with rasterio.open(url) as src:
+                img_bounds = transform_bounds('EPSG:4326', src.crs, *bbox)
+                window = rw.from_bounds(*img_bounds, transform=src.transform)
+                col_off = max(0, int(window.col_off))
+                row_off = max(0, int(window.row_off))
+                col_end = min(src.width, int(window.col_off + window.width))
+                row_end = min(src.height, int(window.row_off + window.height))
+                if col_end <= col_off or row_end <= row_off:
+                    return None
+                window_clamped = rw.Window(col_off, row_off, col_end - col_off, row_end - row_off)
+
+                if out_shape is not None:
+                    data = src.read(
+                        1, window=window_clamped,
+                        out_shape=out_shape,
+                        resampling=rasterio.enums.Resampling.bilinear,
+                    ).astype(np.float32)
+                else:
+                    data = src.read(1, window=window_clamped).astype(np.float32)
+
+                out_transform = src.window_transform(window_clamped)
+                return data, out_transform, src.crs
+
+        except Exception as e:
+            print(f"[STAC] COG read error for {url}: {e}")
+            return None
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Date parsing
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _parse_dates(self, date_start: str, date_end: str) -> tuple:
         """Parse date strings to datetime objects."""
         now = datetime.utcnow()
 
-        # Handle relative dates
         regex_dt = None
         if isinstance(date_start, str):
-            # Regex patterns for English and Indonesian
-            # Years
             m = re.search(r'(\d+)\s*tahun', date_start, re.IGNORECASE) or \
                 re.search(r'last\s*(\d+)\s*year', date_start, re.IGNORECASE) or \
                 re.search(r'(\d+)\s*years?\s*ago', date_start, re.IGNORECASE)
             if m:
                 regex_dt = now - timedelta(days=int(m.group(1)) * 365)
-            
-            # Months
+
             if not regex_dt:
                 m = re.search(r'(\d+)\s*bulan', date_start, re.IGNORECASE) or \
                     re.search(r'last\s*(\d+)\s*month', date_start, re.IGNORECASE) or \
                     re.search(r'(\d+)\s*months?\s*ago', date_start, re.IGNORECASE)
                 if m:
                     regex_dt = now - timedelta(days=int(m.group(1)) * 30)
-            
-            # Weeks
+
             if not regex_dt:
                 m = re.search(r'(\d+)\s*minggu', date_start, re.IGNORECASE) or \
                     re.search(r'last\s*(\d+)\s*week', date_start, re.IGNORECASE) or \
                     re.search(r'(\d+)\s*weeks?\s*ago', date_start, re.IGNORECASE)
                 if m:
                     regex_dt = now - timedelta(days=int(m.group(1)) * 7)
-            
-            # Days
+
             if not regex_dt:
                 m = re.search(r'(\d+)\s*hari', date_start, re.IGNORECASE) or \
                     re.search(r'last\s*(\d+)\s*day', date_start, re.IGNORECASE) or \
                     re.search(r'(\d+)\s*days?\s*ago', date_start, re.IGNORECASE)
                 if m:
                     regex_dt = now - timedelta(days=int(m.group(1)))
-            
-            # Fixed patterns
+
             if not regex_dt:
                 if re.search(r'tahun\s*lalu', date_start, re.IGNORECASE):
                     regex_dt = now - timedelta(days=365)
@@ -356,7 +561,6 @@ class SentinelDownloader:
             except (ValueError, TypeError):
                 date_start = now - timedelta(days=7)
 
-        # Handle end date
         if date_end in ['today', 'now']:
             date_end = now
         else:
