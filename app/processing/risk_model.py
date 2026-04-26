@@ -10,29 +10,32 @@ from ..utils.config import settings
 class FloodRiskModel:
     """Simple flood risk prediction based on terrain and rainfall."""
 
-    def __init__(self):
+    def __init__(self, job_id: Optional[str] = None):
         """Initialize flood risk model."""
-        self.output_dir = settings.output_dir / "risk_maps"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if job_id:
+            self.job_dir = settings.get_job_dir(job_id)
+            self.output_dir = self.job_dir / "risk_maps"
+        else:
+            self.output_dir = settings.output_dir / "risk_maps"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.job_id = job_id
 
     def predict_risk(
         self,
         bbox: tuple,
         rainfall_mm: float,
         flood_extent: Optional[np.ndarray] = None,
-        dem_data: Optional[np.ndarray] = None
+        dem_data: Optional[np.ndarray] = None,
+        job_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Predict flood risk based on multiple factors.
-
-        Args:
-            bbox: Area of interest (min_lon, min_lat, max_lon, max_lat)
-            rainfall_mm: Total rainfall in mm
-            flood_extent: Current flood mask (optional)
-            dem_data: Digital elevation model data (optional)
-
-        Returns: Risk assessment results
         """
+        if job_id and job_id != self.job_id:
+            self.job_id = job_id
+            self.job_dir = settings.get_job_dir(job_id)
+            self.output_dir = self.job_dir / "risk_maps"
+            
         # Generate risk factors
         risk_factors = self._calculate_risk_factors(bbox, rainfall_mm, dem_data)
 
@@ -194,7 +197,8 @@ class FloodRiskModel:
         """Save risk assessment results."""
         import uuid
 
-        job_id = str(uuid.uuid4())[:8]
+        # Use class job_id or generate unique ID
+        job_id = self.job_id if self.job_id else str(uuid.uuid4())[:8]
         metadata_path = self.output_dir / f"risk_{job_id}.json"
 
         # Don't save full risk maps in JSON (too large)

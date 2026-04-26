@@ -29,6 +29,21 @@ class Settings(BaseSettings):
     data_dir: Path = base_dir / "data"
     output_dir: Path = base_dir / "output"
 
+    def get_job_dir(self, job_id: str) -> Path:
+        """Get or create a job-specific output directory."""
+        job_dir = self.output_dir / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create subdirectories
+        (job_dir / "flood_masks").mkdir(exist_ok=True)
+        (job_dir / "optical_analysis").mkdir(exist_ok=True)
+        (job_dir / "risk_maps").mkdir(exist_ok=True)
+        (job_dir / "maps").mkdir(exist_ok=True)
+        (job_dir / "reports").mkdir(exist_ok=True)
+        (job_dir / "vector_data").mkdir(exist_ok=True)
+        
+        return job_dir
+
     # Processing settings
     default_buffer_km: float = 50.0  # Default search radius
     water_threshold_vv: float = -17.0  # dB threshold for water in SAR

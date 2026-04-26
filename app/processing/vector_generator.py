@@ -37,9 +37,15 @@ from ..utils.config import settings
 class VectorGenerator:
     """Generates GIS vector layers from satellite flood analysis."""
 
-    def __init__(self):
-        self.output_dir = settings.output_dir / "vector_data"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, job_id: Optional[str] = None):
+        if job_id:
+            self.job_dir = settings.get_job_dir(job_id)
+            self.output_dir = self.job_dir / "vector_data"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.output_dir = settings.output_dir / "vector_data"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.job_id = job_id
 
     def generate_flood_extent_vector(
         self,

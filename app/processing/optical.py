@@ -51,28 +51,30 @@ def calculate_ndwi_and_mask(input_path: str, green_band_idx: int = 1, nir_band_i
 class OpticalProcessor:
     """Process Sentinel-2 optical data for flood validation."""
 
-    def __init__(self):
+    def __init__(self, job_id: Optional[str] = None):
         """Initialize optical processor."""
-        self.output_dir = settings.output_dir / "optical_analysis"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if job_id:
+            self.job_dir = settings.get_job_dir(job_id)
+            self.output_dir = self.job_dir / "optical_analysis"
+        else:
+            self.output_dir = settings.output_dir / "optical_analysis"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.job_id = job_id
 
     def calculate_ndwi(
         self,
         filepath: str,
-        bbox: Optional[tuple] = None
+        bbox: Optional[tuple] = None,
+        job_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Calculate Normalized Difference Water Index (NDWI).
-
-        NDWI = (Green - NIR) / (Green + NIR)
-        Values > 0.3 typically indicate water
-
-        Args:
-            filepath: Path to Sentinel-2 GeoTIFF
-            bbox: Optional area of interest
-
-        Returns: NDWI analysis results
         """
+        if job_id and job_id != self.job_id:
+            self.job_id = job_id
+            self.job_dir = settings.get_job_dir(job_id)
+            self.output_dir = self.job_dir / "optical_analysis"
+
         if not RASTERIO_AVAILABLE:
             print("rasterio not available")
             return None
@@ -220,7 +222,8 @@ class OpticalProcessor:
         import uuid
         import json
 
-        job_id = str(uuid.uuid4())[:8]
+        # Use class job_id or generate unique ID
+        job_id = self.job_id if self.job_id else str(uuid.uuid4())[:8]
 
         # Save NDWI raster
         ndwi_path = self.output_dir / f"ndwi_{job_id}.tiff"

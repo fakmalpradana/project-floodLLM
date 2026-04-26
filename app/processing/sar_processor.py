@@ -76,28 +76,33 @@ def detect_water_sar(input_path: str, output_path: str = None) -> tuple:
 class SARProcessor:
     """Process Sentinel-1 SAR data for flood detection."""
 
-    def __init__(self):
+    def __init__(self, job_id: Optional[str] = None):
         """Initialize SAR processor."""
-        self.output_dir = settings.output_dir / "flood_masks"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if job_id:
+            self.job_dir = settings.get_job_dir(job_id)
+            self.output_dir = self.job_dir / "flood_masks"
+        else:
+            self.output_dir = settings.output_dir / "flood_masks"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            
         self.water_threshold = settings.water_threshold_vv
+        self.job_id = job_id
 
     def process(
         self,
         filepath: str,
         bbox: tuple,
-        method: str = "otsu"
+        method: str = "otsu",
+        job_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Process Sentinel-1 image for flood detection.
-
-        Args:
-            filepath: Path to GeoTIFF file
-            bbox: Area of interest (min_lon, min_lat, max_lon, max_lat)
-            method: "otsu" for automatic threshold, "fixed" for manual
-
-        Returns: Flood detection results
         """
+        if job_id and job_id != self.job_id:
+            self.job_id = job_id
+            self.job_dir = settings.get_job_dir(job_id)
+            self.output_dir = self.job_dir / "flood_masks"
+
         if not RASTERIO_AVAILABLE:
             print("rasterio not available. Cannot process SAR data.")
             return None
@@ -273,8 +278,8 @@ class SARProcessor:
         """Save flood mask and metadata."""
         import uuid
 
-        # Generate unique ID
-        job_id = str(uuid.uuid4())[:8]
+        # Use class job_id or generate unique ID
+        job_id = self.job_id if self.job_id else str(uuid.uuid4())[:8]
 
         # Save mask as GeoTIFF
         mask_path = self.output_dir / f"flood_mask_{job_id}.tiff"

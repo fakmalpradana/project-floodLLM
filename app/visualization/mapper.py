@@ -17,10 +17,15 @@ from ..utils.config import settings
 class FloodMapper:
     """Generate interactive flood maps."""
 
-    def __init__(self):
+    def __init__(self, job_id: Optional[str] = None):
         """Initialize flood mapper."""
-        self.output_dir = settings.output_dir / "maps"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if job_id:
+            self.job_dir = settings.get_job_dir(job_id)
+            self.output_dir = self.job_dir / "maps"
+        else:
+            self.output_dir = settings.output_dir / "maps"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.job_id = job_id
 
     def create_flood_map(
         self,
@@ -32,16 +37,12 @@ class FloodMapper:
     ) -> Dict[str, Any]:
         """
         Create interactive flood map.
-
-        Args:
-            flood_mask: Binary flood extent mask
-            bbox: (min_lon, min_lat, max_lon, max_lat)
-            job_id: Unique job identifier
-            base_layer: Base map type
-            overlay_data: Additional data to overlay
-
-        Returns: Map file info
         """
+        if job_id and job_id != self.job_id:
+            self.job_id = job_id
+            self.job_dir = settings.get_job_dir(job_id)
+            self.output_dir = self.job_dir / "maps"
+
         if not FOLIUM_AVAILABLE:
             return {'error': 'folium not available'}
 
