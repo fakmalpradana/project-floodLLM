@@ -150,84 +150,90 @@ class SentinelDownloader:
         date_end: datetime,
         max_images: int
     ) -> List[Dict[str, Any]]:
-        """Download Sentinel-1 RTC via Microsoft Planetary Computer STAC (no auth required)."""
-        downloaded = []
+        """Download Sentinel-1 RTC via Planetary Computer STAC (no auth). Runs in thread pool."""
         try:
-            from pystac_client import Client
-            import planetary_computer
-            import rasterio
-            from rasterio.warp import transform_bounds
-            import rasterio.windows as rw
-            import numpy as np
-
-            catalog = Client.open(
-                "https://planetarycomputer.microsoft.com/api/stac/v1",
-                modifier=planetary_computer.sign_inplace,
+            return await asyncio.to_thread(
+                self._sync_dl_s1_pc, bbox, date_start, date_end, max_images
             )
-
-            search = catalog.search(
-                collections=["sentinel-1-rtc"],
-                bbox=list(bbox),
-                datetime=f"{date_start.strftime('%Y-%m-%d')}/{date_end.strftime('%Y-%m-%d')}",
-                max_items=max_images,
-            )
-
-            items = list(search.items())
-            if not items:
-                print("[S1] Planetary Computer: no Sentinel-1 RTC images found")
-                return []
-
-            for item in items[:max_images]:
-                if 'vv' not in item.assets:
-                    continue
-                vv_url = item.assets['vv'].href
-                try:
-                    with rasterio.open(vv_url) as src:
-                        img_bounds = transform_bounds('EPSG:4326', src.crs, *bbox)
-                        window = rw.from_bounds(*img_bounds, transform=src.transform)
-                        # Clamp to valid image extent
-                        col_off = max(0, int(window.col_off))
-                        row_off = max(0, int(window.row_off))
-                        col_end = min(src.width, int(window.col_off + window.width))
-                        row_end = min(src.height, int(window.row_off + window.height))
-                        if col_end <= col_off or row_end <= row_off:
-                            continue
-                        window_clamped = rw.Window(col_off, row_off, col_end - col_off, row_end - row_off)
-
-                        data = src.read(1, window=window_clamped).astype(np.float32)
-                        out_transform = src.window_transform(window_clamped)
-
-                        # Convert linear gamma0 to dB
-                        data_db = 10 * np.log10(np.where(data > 0, data, 1e-10)).astype(np.float32)
-
-                        filepath = self.data_dir / f"s1_rtc_{item.id}.tiff"
-                        with rasterio.open(
-                            filepath, 'w',
-                            driver='GTiff', dtype='float32',
-                            count=1, crs=src.crs,
-                            transform=out_transform,
-                            width=col_end - col_off,
-                            height=row_end - row_off,
-                        ) as dst:
-                            dst.write(data_db, 1)
-
-                    downloaded.append({
-                        'id': item.id,
-                        'filepath': str(filepath),
-                        'date': item.datetime.isoformat() if item.datetime else date_start.isoformat(),
-                        'bbox': bbox,
-                        'source': 'planetary_computer',
-                    })
-                    print(f"[S1] Downloaded from Planetary Computer: {item.id}")
-
-                except Exception as e:
-                    print(f"[S1] Error downloading {item.id}: {e}")
-                    continue
-
         except ImportError:
             print("[S1] pystac-client or planetary-computer not installed — skipping Planetary Computer")
         except Exception as e:
             print(f"[S1] Planetary Computer error: {e}")
+        return []
+
+    def _sync_dl_s1_pc(
+        self,
+        bbox: tuple,
+        date_start: datetime,
+        date_end: datetime,
+        max_images: int
+    ) -> List[Dict[str, Any]]:
+        """Synchronous worker: search Planetary Computer and read COG for bbox."""
+        from pystac_client import Client
+        import planetary_computer
+        import rasterio
+        from rasterio.warp import transform_bounds
+        import rasterio.windows as rw
+        import numpy as np
+
+        catalog = Client.open(
+            "https://planetarycomputer.microsoft.com/api/stac/v1",
+            modifier=planetary_computer.sign_inplace,
+        )
+        search = catalog.search(
+            collections=["sentinel-1-rtc"],
+            bbox=list(bbox),
+            datetime=f"{date_start.strftime('%Y-%m-%d')}/{date_end.strftime('%Y-%m-%d')}",
+            max_items=max_images,
+        )
+        items = list(search.items())
+        if not items:
+            print("[S1] Planetary Computer: no Sentinel-1 RTC images found")
+            return []
+
+        downloaded = []
+        for item in items[:max_images]:
+            if 'vv' not in item.assets:
+                continue
+            vv_url = item.assets['vv'].href
+            try:
+                with rasterio.open(vv_url) as src:
+                    img_bounds = transform_bounds('EPSG:4326', src.crs, *bbox)
+                    window = rw.from_bounds(*img_bounds, transform=src.transform)
+                    col_off = max(0, int(window.col_off))
+                    row_off = max(0, int(window.row_off))
+                    col_end = min(src.width, int(window.col_off + window.width))
+                    row_end = min(src.height, int(window.row_off + window.height))
+                    if col_end <= col_off or row_end <= row_off:
+                        continue
+                    window_clamped = rw.Window(col_off, row_off, col_end - col_off, row_end - row_off)
+                    data = src.read(1, window=window_clamped).astype(np.float32)
+                    out_transform = src.window_transform(window_clamped)
+                    data_db = 10 * np.log10(np.where(data > 0, data, 1e-10)).astype(np.float32)
+
+                    filepath = self.data_dir / f"s1_rtc_{item.id}.tiff"
+                    with rasterio.open(
+                        filepath, 'w',
+                        driver='GTiff', dtype='float32',
+                        count=1, crs=src.crs,
+                        transform=out_transform,
+                        width=col_end - col_off,
+                        height=row_end - row_off,
+                    ) as dst:
+                        dst.write(data_db, 1)
+
+                downloaded.append({
+                    'id': item.id,
+                    'filepath': str(filepath),
+                    'date': item.datetime.isoformat() if item.datetime else date_start.isoformat(),
+                    'bbox': bbox,
+                    'source': 'planetary_computer',
+                })
+                print(f"[S1] Downloaded from Planetary Computer: {item.id}")
+
+            except Exception as e:
+                print(f"[S1] Error downloading {item.id}: {e}")
+                continue
 
         return downloaded
 
@@ -334,10 +340,29 @@ class SentinelDownloader:
         max_images: int
     ) -> List[Dict[str, Any]]:
         """
-        Download Sentinel-2 L2A via STAC.
-        Tries Planetary Computer first, then Element84 Earth Search as fallback.
-        Saves a 2-band GeoTIFF (band 1=green, band 2=NIR) for NDWI calculation.
+        Download Sentinel-2 L2A via STAC (Planetary Computer → Element84).
+        Runs blocking STAC search + rasterio in a thread pool.
+        Saves 2-band GeoTIFF (band 1=green, band 2=NIR) for NDWI.
         """
+        try:
+            return await asyncio.to_thread(
+                self._sync_dl_s2_stac, bbox, date_start, date_end, max_cloud_cover, max_images
+            )
+        except ImportError:
+            print("[S2] pystac-client not installed — skipping STAC download")
+        except Exception as e:
+            print(f"[S2] STAC download error: {e}")
+        return []
+
+    def _sync_dl_s2_stac(
+        self,
+        bbox: tuple,
+        date_start: datetime,
+        date_end: datetime,
+        max_cloud_cover: float,
+        max_images: int
+    ) -> List[Dict[str, Any]]:
+        """Synchronous worker: search STAC and read COG bands for bbox."""
         downloaded = []
 
         # STAC endpoints to try in order
