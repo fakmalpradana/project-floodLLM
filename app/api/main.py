@@ -154,7 +154,7 @@ async def process_flood_request(
         if llm_handler.model:
             try:
                 parse_model = genai.GenerativeModel(
-                    "gemini-2.0-flash",
+                    "gemini-2.0-flash-lite",
                     system_instruction=messages[0]["content"]
                 )
                 response = parse_model.generate_content(messages[1]["content"])

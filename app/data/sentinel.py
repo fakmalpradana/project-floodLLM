@@ -172,7 +172,7 @@ class SentinelDownloader:
                 max_items=max_images,
             )
 
-            items = list(search.get_items())
+            items = list(search.items())
             if not items:
                 print("[S1] Planetary Computer: no Sentinel-1 RTC images found")
                 return []
@@ -386,7 +386,7 @@ class SentinelDownloader:
                         query={source["cloud_prop"]: {"lt": max_cloud_cover}},
                         max_items=max_images,
                     )
-                    items = list(search.get_items())
+                    items = list(search.items())
                     if not items:
                         print(f"[S2] {source['name']}: no images found")
                         continue
