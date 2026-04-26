@@ -10,7 +10,7 @@ import google.generativeai as genai
 import numpy as np
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from ..utils.config import settings
@@ -149,7 +149,7 @@ async def process_flood_request(
         if llm_handler.model:
             try:
                 parse_model = genai.GenerativeModel(
-                    "gemini-2.0-flash-exp",
+                    "gemini-2.0-flash",
                     system_instruction=messages[0]["content"]
                 )
                 response = parse_model.generate_content(messages[1]["content"])
@@ -186,7 +186,12 @@ async def process_flood_request(
             or "today"
         )
 
-        jobs[job_id]["parsed"] = parsed
+        # Store resolved values (not raw LLM dict) so status endpoint shows correct data
+        jobs[job_id]["parsed"] = {
+            "location_name": location,
+            "start_date": date_start,
+            "end_date": date_end,
+        }
 
         # Step 2: Geocode location (always use Nominatim for reliable coordinates;
         # the LLM-provided bbox can be inaccurate/hallucinated for non-Jakarta locations)
@@ -357,6 +362,10 @@ async def process_flood_request(
             analysis_period=f"{date_start} to {date_end}"
         )
         jobs[job_id]["map"] = map_result
+        # Cache HTML content in memory so we can serve it even if container FS is wiped
+        _map_file = map_result.get("map_path")
+        if _map_file and Path(_map_file).exists():
+            jobs[job_id]["map_html"] = Path(_map_file).read_text(encoding="utf-8")
 
         # Step 10: Generate comprehensive satellite analysis report
         jobs[job_id]["status"] = "generating_report"
@@ -376,6 +385,8 @@ async def process_flood_request(
             rainfall_mm=rainfall_mm
         )
         jobs[job_id]["report"] = report_path
+        if report_path and Path(report_path).exists():
+            jobs[job_id]["report_html"] = Path(report_path).read_text(encoding="utf-8")
 
         # Risk summary from FloodRiskModel (still used for risk_level scalar)
         risk_result = risk_model.predict_risk(
@@ -441,7 +452,7 @@ async def get_status(job_id: str):
 
 @app.get("/api/map/{job_id}")
 async def get_map(job_id: str):
-    """Get flood map for job."""
+    """Get flood map for job (served from in-memory cache or file)."""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -449,16 +460,22 @@ async def get_map(job_id: str):
     if job["status"] != "completed":
         raise HTTPException(status_code=400, detail="Job not completed")
 
-    map_path = job.get("map", {}).get("map_path")
-    if not map_path or not Path(map_path).exists():
-        raise HTTPException(status_code=404, detail="Map not found")
+    # Prefer in-memory cached HTML (survives container restarts within same instance)
+    if job.get("map_html"):
+        return HTMLResponse(content=job["map_html"])
 
-    return FileResponse(map_path, media_type="text/html")
+    map_path = job.get("map", {}).get("map_path")
+    if map_path and Path(map_path).exists():
+        html = Path(map_path).read_text(encoding="utf-8")
+        job["map_html"] = html  # cache for subsequent requests
+        return HTMLResponse(content=html)
+
+    raise HTTPException(status_code=404, detail="Map not found")
 
 
 @app.get("/api/report/{job_id}")
 async def get_report(job_id: str):
-    """Get flood report for job."""
+    """Get flood report for job (served from in-memory cache or file)."""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -466,11 +483,17 @@ async def get_report(job_id: str):
     if job["status"] != "completed":
         raise HTTPException(status_code=400, detail="Job not completed")
 
-    report_path = job.get("report")
-    if not report_path or not Path(report_path).exists():
-        raise HTTPException(status_code=404, detail="Report not found")
+    # Prefer in-memory cached HTML
+    if job.get("report_html"):
+        return HTMLResponse(content=job["report_html"])
 
-    return FileResponse(report_path)
+    report_path = job.get("report")
+    if report_path and Path(report_path).exists():
+        html = Path(report_path).read_text(encoding="utf-8")
+        job["report_html"] = html
+        return HTMLResponse(content=html)
+
+    raise HTTPException(status_code=404, detail="Report not found")
 
 
 @app.get("/api/jobs")

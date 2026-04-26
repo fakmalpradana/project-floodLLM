@@ -419,10 +419,11 @@ class VectorGenerator:
         date_detected: str
     ) -> List[Dict]:
         """
-        Generate simulated flood extent polygons positioned within the given bbox.
+        Generate simulated flood extent polygons within the given bbox.
 
-        Polygons are defined as fractions of the bbox extent, so they always fall
-        within the requested area regardless of geographic location.
+        Each polygon covers ~3-6% of the bbox width/height so total flood area
+        is roughly 1-2% of the AOI — consistent with typical urban flood events
+        (e.g. Jakarta 2020: ~6 km² flooded within 645 km² AOI).
         """
         min_lon, min_lat, max_lon, max_lat = bbox
         dlon = max_lon - min_lon
@@ -432,57 +433,57 @@ class VectorGenerator:
             """Return [lon, lat] as fractions of bbox dimensions."""
             return [min_lon + dlon * lf, min_lat + dlat * bf]
 
-        # Five flood polygons covering different parts of the bbox.
-        # Positioned toward the north (higher lat fraction) to simulate
-        # typical coastal/low-lying flood patterns.
+        # Five small flood polygons. Each polygon spans ~2-3% of the bbox in each
+        # direction so the total simulated flood area is ~1-2% of the AOI —
+        # consistent with real urban flood events (e.g. Jakarta 2020: ~6 km²
+        # out of a 645 km² AOI).
         flood_polygons_data = [
-            # Northern coastal / tidal flood zone
+            # Northern coastal strip
             {
                 "coords": [
-                    pt(0.05, 0.75), pt(0.30, 0.77), pt(0.55, 0.79),
-                    pt(0.75, 0.76), pt(0.78, 0.84), pt(0.62, 0.87),
-                    pt(0.38, 0.89), pt(0.18, 0.85), pt(0.05, 0.79),
-                    pt(0.05, 0.75),
+                    pt(0.10, 0.82), pt(0.13, 0.815), pt(0.16, 0.82),
+                    pt(0.155, 0.848), pt(0.125, 0.852), pt(0.095, 0.842),
+                    pt(0.10, 0.82),
                 ],
                 "confidence": "HIGH",
                 "flood_type": "coastal_tidal",
             },
-            # North-east river overflow zone
+            # North-east river corridor
             {
                 "coords": [
-                    pt(0.65, 0.63), pt(0.80, 0.61), pt(0.92, 0.64),
-                    pt(0.93, 0.72), pt(0.84, 0.76), pt(0.68, 0.74),
-                    pt(0.63, 0.68), pt(0.65, 0.63),
+                    pt(0.68, 0.74), pt(0.71, 0.735), pt(0.74, 0.742),
+                    pt(0.738, 0.770), pt(0.708, 0.775), pt(0.675, 0.765),
+                    pt(0.68, 0.74),
                 ],
                 "confidence": "HIGH",
                 "flood_type": "river_overflow",
             },
-            # Western river overflow zone
+            # Western river bank
             {
                 "coords": [
-                    pt(0.05, 0.61), pt(0.25, 0.59), pt(0.38, 0.63),
-                    pt(0.40, 0.72), pt(0.28, 0.76), pt(0.07, 0.73),
-                    pt(0.02, 0.66), pt(0.05, 0.61),
+                    pt(0.08, 0.64), pt(0.11, 0.635), pt(0.135, 0.643),
+                    pt(0.132, 0.668), pt(0.105, 0.673), pt(0.077, 0.663),
+                    pt(0.08, 0.64),
                 ],
                 "confidence": "MEDIUM",
                 "flood_type": "river_overflow",
             },
-            # Central-east river overflow zone
+            # Central-east low-lying area
             {
                 "coords": [
-                    pt(0.55, 0.38), pt(0.68, 0.35), pt(0.78, 0.39),
-                    pt(0.80, 0.49), pt(0.70, 0.56), pt(0.55, 0.52),
-                    pt(0.50, 0.43), pt(0.55, 0.38),
+                    pt(0.57, 0.56), pt(0.60, 0.555), pt(0.625, 0.562),
+                    pt(0.622, 0.588), pt(0.594, 0.593), pt(0.567, 0.583),
+                    pt(0.57, 0.56),
                 ],
                 "confidence": "HIGH",
                 "flood_type": "river_overflow",
             },
-            # Central urban pluvial flooding
+            # Central urban pluvial pocket
             {
                 "coords": [
-                    pt(0.40, 0.41), pt(0.50, 0.38), pt(0.57, 0.42),
-                    pt(0.58, 0.51), pt(0.48, 0.56), pt(0.38, 0.52),
-                    pt(0.40, 0.41),
+                    pt(0.43, 0.58), pt(0.455, 0.576), pt(0.475, 0.582),
+                    pt(0.472, 0.606), pt(0.447, 0.610), pt(0.427, 0.601),
+                    pt(0.43, 0.58),
                 ],
                 "confidence": "MEDIUM",
                 "flood_type": "urban_pluvial",
